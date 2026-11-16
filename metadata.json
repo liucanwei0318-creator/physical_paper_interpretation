@@ -1,0 +1,6 @@
+{
+  "name": "PhysicaAnnotate — 理论物理英文论文深度翻译与精准批注系统",
+  "description": "基于个人知识背景模型（K1-K4分级）的理论物理英文论文深度中文学术翻译、精准批注、数学推导还原与互联网文献核验工作台。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
