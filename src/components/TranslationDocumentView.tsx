@@ -9,6 +9,7 @@ import {
   PaperChatTurn,
   DerivationMindMapTree,
   AnnotationDetailLevel,
+  InProgressTranslationSnapshot,
 } from '../types/physics';
 import { shouldDisplayAnnotation } from '../utils/knowledgeEngine';
 import {
@@ -121,6 +122,9 @@ interface TranslationDocumentViewProps {
   onOpenSettings?: () => void;
   onRetryDegradedSections?: (chunkIndices?: number[]) => Promise<void>;
   retryingChunkIndices?: number[];
+  isTranslatingFull?: boolean;
+  inProgressTranslation?: InProgressTranslationSnapshot | null;
+  onResumeIncompleteTranslation?: () => void;
 }
 
 interface FlattenedParagraphLocation {
@@ -149,6 +153,9 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
   onOpenSettings,
   onRetryDegradedSections,
   retryingChunkIndices = [],
+  isTranslatingFull = false,
+  inProgressTranslation = null,
+  onResumeIncompleteTranslation,
 }) => {
   const detailProfile = getAnnotationDetailProfile(annotationDetailLevel);
   const [showSuppressedK1, setShowSuppressedK1] = useState(false);
@@ -418,14 +425,15 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
     }
   }, [displayedChatTurns, isSendingChat]);
 
-  // Count visible vs suppressed annotations
+  // Count visible vs suppressed annotations safely
   let totalAnnotations = 0;
   let visibleAnnotations = 0;
   let suppressedK1Count = 0;
 
-  for (const sec of paperDoc.sections) {
-    for (const para of sec.paragraphs) {
-      for (const ann of para.annotations) {
+  for (const sec of paperDoc.sections || []) {
+    for (const para of sec.paragraphs || []) {
+      for (const ann of para.annotations || []) {
+        if (!ann) continue;
         totalAnnotations++;
         const status = shouldDisplayAnnotation(ann, knowledgeNodes, showSuppressedK1);
         if (status.currentLevel === 'K1') {
@@ -578,7 +586,9 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
             titleEn: paperDoc.titleEn,
             authors: paperDoc.authors,
             abstractZh: paperDoc.abstractZh,
-            allSectionTitles: paperDoc.sections.map((s) => `${s.sectionNumber} ${s.titleZh}`),
+            allSectionTitles: (paperDoc.sections || []).map(
+              (s) => `${s.sectionNumber} ${s.titleZh}`
+            ),
           },
           knowledgeNodes,
           materials,
@@ -871,6 +881,59 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
         </div>
       </section>
 
+      {/* Incremental Translation Live Reading / Breakpoint Resume Banner */}
+      {inProgressTranslation &&
+        (() => {
+          const doneCount = inProgressTranslation.outcomes.filter(
+            (o) =>
+              o.status === 'completed' || o.status === 'degraded' || o.status === 'failed'
+          ).length;
+          const totalCount = inProgressTranslation.chunks.length;
+          if (doneCount >= totalCount) return null;
+          return (
+            <div
+              data-testid="incremental-translation-banner"
+              className="p-4 bg-blue-50/90 border border-blue-200 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+            >
+              <div className="space-y-1">
+                <div className="font-semibold text-blue-950 flex items-center gap-2">
+                  {isTranslatingFull ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
+                      <span>
+                        正在后台边译边存（实时可读模式）：已完成 {doneCount} / {totalCount} 节，新译完的章节将自动追加至下方文稿
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <History className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                      <span>
+                        断点续译就绪：本篇论文已保存前 {doneCount} / {totalCount} 节，尚有{' '}
+                        {totalCount - doneCount} 节待继续翻译
+                      </span>
+                    </>
+                  )}
+                </div>
+                <progress
+                  value={doneCount}
+                  max={Math.max(1, totalCount)}
+                  className="w-full sm:w-80 h-1.5 accent-blue-600 rounded overflow-hidden block"
+                />
+              </div>
+              {!isTranslatingFull && onResumeIncompleteTranslation && (
+                <button
+                  type="button"
+                  onClick={onResumeIncompleteTranslation}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>从第 {doneCount + 1} 节继续断点续译</span>
+                </button>
+              )}
+            </div>
+          );
+        })()}
+
       {paperDoc.generationMeta?.degraded && (
         <DiagnosticAlert
           variant="degraded"
@@ -929,7 +992,7 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
 
           {/* Sections & Paragraphs with Tightly-Coupled Inline Precision Annotations */}
           <div className="space-y-12">
-            {paperDoc.sections.map((section, secIdx) => {
+            {(paperDoc.sections || []).map((section, secIdx) => {
               const targetChunkIdx = section.chunkIndex ?? secIdx;
               const isSectionRetrying = retryingChunkIndices.includes(targetChunkIdx);
               return (
@@ -964,7 +1027,7 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
                 </div>
 
                 <div className="space-y-8">
-                  {section.paragraphs.map((para) => {
+                  {(section.paragraphs || []).map((para) => {
                     const isOriginalShown = showOriginalPopoverId === para.id;
                     const isParaActive = activeParagraphId === para.id;
                     const hasComplexFormula = paragraphHasComplexFormula(para);
@@ -1233,7 +1296,8 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
 
                         {/* Inline Precision Annotations Following Immediately After the Paragraph / Formula */}
                         <div className="space-y-4">
-                          {para.annotations.map((ann) => {
+                          {(para.annotations || []).map((ann) => {
+                            if (!ann) return null;
                             if (
                               selectedAnnotationType !== 'ALL' &&
                               ann.type !== selectedAnnotationType
@@ -1410,13 +1474,13 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
 
                                     {/* Symbol Dictionary Grid */}
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs bg-white p-3.5 border border-slate-200 rounded-md">
-                                      {ann.formulaAnalysis.symbols.map((sym, sIdx) => (
+                                      {(ann.formulaAnalysis.symbols || []).map((sym, sIdx) => (
                                         <div key={sIdx} className="flex items-baseline gap-2">
                                           <span className="font-mono-tabular font-semibold text-slate-900 shrink-0">
-                                            <LatexBlock latex={sym.symbolLatex} /> :
+                                            <LatexBlock latex={sym?.symbolLatex || ''} /> :
                                           </span>
                                           <span className="text-slate-600">
-                                            <MixedAcademicText text={sym.meaningZh} />
+                                            <MixedAcademicText text={sym?.meaningZh || ''} />
                                           </span>
                                         </div>
                                       ))}
@@ -1430,7 +1494,7 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
                                         </span>
                                         <span className="text-slate-700 ml-1">
                                           <MixedAcademicText
-                                            text={ann.formulaAnalysis.theoremsUsed.join('；')}
+                                            text={(ann.formulaAnalysis.theoremsUsed || []).join('；')}
                                           />
                                         </span>
                                       </div>
@@ -1440,7 +1504,7 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
                                         </span>
                                         <span className="text-slate-700 ml-1">
                                           <MixedAcademicText
-                                            text={ann.formulaAnalysis.validityConditions}
+                                            text={ann.formulaAnalysis.validityConditions || ''}
                                           />
                                         </span>
                                       </div>
@@ -1451,27 +1515,27 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
                                       <div className="text-xs font-semibold text-slate-800">
                                         关键中间推导步骤（严格区分作者原文与 AI 补充推导）：
                                       </div>
-                                      {ann.formulaAnalysis.derivationSteps.map((step) => (
+                                      {(ann.formulaAnalysis.derivationSteps || []).map((step, stepIdx) => (
                                         <div
-                                          key={step.stepIndex}
+                                          key={step?.stepIndex ?? stepIdx}
                                           className="p-3.5 bg-white border border-slate-200 rounded-md space-y-2"
                                         >
                                           <div className="flex items-center justify-between text-xs">
                                             <span className="font-mono-tabular font-semibold text-slate-900">
-                                              步骤 {step.stepIndex} · 【{step.sourceType}】
+                                              步骤 {step?.stepIndex ?? stepIdx + 1} · 【{step?.sourceType || '原文推导'}】
                                             </span>
                                             <span className="text-slate-400 font-mono-tabular">
-                                              {step.sourceType === '原文推导'
+                                              {step?.sourceType === '原文推导'
                                                 ? '论文作者显式给出的步骤'
-                                                : step.sourceType === '补充推导'
+                                                : step?.sourceType === '补充推导'
                                                 ? '为跨越理解障碍补充的被省略步骤'
                                                 : '独立核验量纲、系数或极限一致性'}
                                             </span>
                                           </div>
                                           <p className="text-xs text-slate-700 leading-relaxed">
-                                            <MixedAcademicText text={step.descriptionZh} />
+                                            <MixedAcademicText text={step?.descriptionZh || ''} />
                                           </p>
-                                          <LatexBlock latex={step.latex} displayMode={true} />
+                                          <LatexBlock latex={step?.latex || ''} displayMode={true} />
                                         </div>
                                       ))}
                                     </div>

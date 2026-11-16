@@ -181,3 +181,87 @@ We thank DFG and NSF for financial support.
   assert.ok(!chunks.some((c) => /Acknowledgments|DFG/i.test(c.rawChunkText)));
 });
 
+test('mergeTranslatedSectionChunks and exportAcademicMarkdown never throw when LLM omits annotations or formulaAnalysis sub-arrays', async () => {
+  const { exportAcademicMarkdown } = await import('./knowledgeEngine');
+
+  // Simulate an LLM response where paragraph 1 omits `annotations` completely,
+  // and paragraph 2 has an annotation whose `formulaAnalysis` omits `theoremsUsed`, `symbols`, and `derivationSteps`
+  const malformedSectionFromLlm = {
+    sectionNumber: '0',
+    titleZh: '摘要与主结论',
+    titleEn: 'Abstract',
+    paragraphs: [
+      {
+        id: 'p-c1-1',
+        paragraphIndex: 1,
+        statementType: '正文论述',
+        originalEnExcerpt: 'Abstract paragraph without annotations key.',
+        translatedZhText: '这是一个大模型未返回 annotations 数组的段落。',
+        // annotations intentionally omitted!
+      },
+      {
+        id: 'p-c1-2',
+        paragraphIndex: 2,
+        statementType: '核心定理/引理',
+        originalEnExcerpt: 'Second paragraph with partial formulaAnalysis.',
+        translatedZhText: '这是第二个段落，包含不完整的 formulaAnalysis。',
+        annotations: [
+          {
+            id: 'ann-partial-1',
+            type: '数学推导',
+            targetConceptZh: '黑洞表面引力',
+            targetConceptEn: 'Surface Gravity',
+            targetEquationOrClause: '$\\kappa = \\frac{1}{4M}$',
+            knowledgeLevelTag: 'K3',
+            whatItIs: '视界处的红移修正加速度',
+            whyHereAndRole: '决定霍金辐射温度',
+            mathOrPhysicalMechanism: '欧几里得锥奇点消除条件',
+            formulaAnalysis: {
+              equationNumber: '1.1',
+              latex: 'T_H = \\frac{\\hbar \\kappa}{2\\pi k_B c}',
+              // symbols, theoremsUsed, and derivationSteps intentionally omitted!
+            },
+          },
+        ],
+      },
+    ],
+  } as any;
+
+  const merged = mergeTranslatedSectionChunks({
+    baseMeta: {
+      paperId: 'doc-malformed-test',
+      titleZh: '不完整 JSON 字段防御测试',
+      titleEn: 'Defensive Normalization Test',
+      authors: 'S. Hawking',
+      institutionOrJournal: 'arXiv',
+      arxivIdOrDoi: 'arXiv:2601.00001',
+      abstractZh: '测试摘要',
+      groundingSources: [],
+    },
+    chunkOutcomes: [
+      {
+        chunkIndex: 0,
+        sectionNumber: '0',
+        sectionTitleEn: 'Abstract',
+        status: 'completed',
+        section: malformedSectionFromLlm,
+      },
+    ],
+  });
+
+  // Verify arrays were safely normalized
+  assert.ok(Array.isArray(merged.sections[0].paragraphs[0].annotations));
+  assert.equal(merged.sections[0].paragraphs[0].annotations.length, 0);
+  const fa = merged.sections[0].paragraphs[1].annotations[0].formulaAnalysis;
+  assert.ok(fa);
+  assert.ok(Array.isArray(fa.symbols));
+  assert.ok(Array.isArray(fa.theoremsUsed));
+  assert.ok(Array.isArray(fa.derivationSteps));
+
+  // Verify exportAcademicMarkdown runs without throwing TypeError
+  const md = exportAcademicMarkdown(merged, [], null, null, false);
+  assert.match(md, /不完整 JSON 字段防御测试/);
+  assert.match(md, /黑洞表面引力/);
+});
+
+

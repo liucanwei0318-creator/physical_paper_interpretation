@@ -5,8 +5,10 @@ import type {
   KnowledgeNode,
   AnnotationDetailLevel,
   TranslationProgressState,
+  InProgressTranslationSnapshot,
 } from '../types/physics';
 import { getAnnotationDetailProfile } from '../utils/annotationSettings';
+import { parseArxivAtomXml } from '../utils/arxivParser';
 import { MixedAcademicText } from './LatexRenderer';
 import { DiagnosticAlert } from './DiagnosticAlert';
 import {
@@ -46,6 +48,10 @@ interface PreAnalysisStageViewProps {
   onBackToKnowledgeStage: () => void;
   annotationDetailLevel?: AnnotationDetailLevel;
   onOpenSettings?: () => void;
+  inProgressTranslation?: InProgressTranslationSnapshot | null;
+  onResumeIncompleteTranslation?: () => void;
+  hasPartialTranslatedDocument?: boolean;
+  onSwitchToTranslationTab?: () => void;
 }
 
 export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
@@ -69,6 +75,10 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
   onBackToKnowledgeStage,
   annotationDetailLevel = 3,
   onOpenSettings,
+  inProgressTranslation = null,
+  onResumeIncompleteTranslation,
+  hasPartialTranslatedDocument = false,
+  onSwitchToTranslationTab,
 }) => {
   const detailProfile = getAnnotationDetailProfile(annotationDetailLevel);
   const [arxivSearchInput, setArxivSearchInput] = useState('');
@@ -129,7 +139,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
             titleEn: currentPreAnalysis.titleEn,
             authors: currentPreAnalysis.authors,
             abstractZh: currentPreAnalysis.coreInnovationSummary,
-            allSectionTitles: currentPreAnalysis.sectionGaps.map(
+            allSectionTitles: (currentPreAnalysis.sectionGaps || []).map(
               (s) => `${s.sectionNumber} ${s.sectionTitleZh} (${s.sectionTitleEn})`
             ),
           },
@@ -159,7 +169,8 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
   };
 
   const runArxivFetch = async () => {
-    if (!arxivSearchInput.trim()) {
+    const cleanInput = arxivSearchInput.trim();
+    if (!cleanInput) {
       setArxivError('请输入 arXiv 编号（如 hep-th/0603001、2301.00001）、arXiv 链接或英文论文标题。');
       return;
     }
@@ -168,26 +179,64 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
     setArxivSuccessMsg('');
     setIsFetchingArxiv(true);
     try {
-      const resp = await fetch('/api/fetch-arxiv', {
+      let resp = await fetch('/api/fetch-arxiv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ arxivInput: arxivSearchInput.trim() }),
+        body: JSON.stringify({ arxivInput: cleanInput }),
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || '未能从 arXiv 获取该文献');
+
+      // Fallback 1: If POST /api/fetch-arxiv returned 404/405 in a proxy environment, try GET
+      if (resp.status === 404 || resp.status === 405) {
+        resp = await fetch(`/api/fetch-arxiv?arxivInput=${encodeURIComponent(cleanInput)}`);
       }
-      onChangePaperTitle(data.title || arxivSearchInput.trim());
-      onChangePaperAuthors(data.authors || '');
-      onChangePaperArxivId(data.uri || arxivSearchInput.trim());
-      onChangePaperRawText(data.fullTextSections || data.abstractText || '');
-      if (data.extractionWarning) {
-        setArxivWarning(data.extractionWarning);
-      } else {
-        setArxivSuccessMsg(
-          `已成功从互联网（arXiv / ar5iv）拉取论文《${data.title}》的章节与公式文本（共 ${(data.fullTextSections || '').length} 字符）！`
-        );
+
+      if (resp.ok) {
+        const data = await resp.json();
+        onChangePaperTitle(data.title || cleanInput);
+        onChangePaperAuthors(data.authors || '');
+        onChangePaperArxivId(data.uri || cleanInput);
+        onChangePaperRawText(data.fullTextSections || data.abstractText || '');
+        if (data.extractionWarning) {
+          setArxivWarning(data.extractionWarning);
+        } else {
+          setArxivSuccessMsg(
+            `已成功从互联网（arXiv / ar5iv）拉取论文《${data.title}》的章节与公式文本（共 ${(data.fullTextSections || '').length} 字符）！`
+          );
+        }
+        return;
       }
+
+      // Fallback 2: Direct client-side HTTPS query to official export.arxiv.org API
+      const cleanIdMatch = cleanInput.match(
+        /(?:arxiv:|abs\/|pdf\/|html\/)?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+\/\d{7}(?:v\d+)?)/i
+      );
+      const directUrl = cleanIdMatch
+        ? `https://export.arxiv.org/api/query?id_list=${encodeURIComponent(cleanIdMatch[1])}`
+        : `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(cleanInput)}&start=0&max_results=1`;
+      const directResp = await fetch(directUrl);
+      if (directResp.ok) {
+        const xmlText = await directResp.text();
+        const parsedPapers = parseArxivAtomXml(xmlText, { limit: 1 });
+        if (parsedPapers.length > 0) {
+          const top = parsedPapers[0];
+          onChangePaperTitle(top.title);
+          onChangePaperAuthors(top.authors.join(', '));
+          onChangePaperArxivId(top.absUrl || `arXiv:${top.arxivId}`);
+          onChangePaperRawText(`Abstract\n${top.abstractSummary}`);
+          setArxivSuccessMsg(
+            `已通过 arXiv 官方接口拉取论文《${top.title}》元数据与摘要（共 ${top.abstractSummary.length} 字符）！`
+          );
+          return;
+        }
+      }
+
+      let errorData: { error?: string } = {};
+      try {
+        errorData = await resp.json();
+      } catch {
+        // Ignore non-JSON body
+      }
+      throw new Error(errorData.error || '未能从 arXiv 获取该文献，请检查编号或直接上传 PDF');
     } catch (err) {
       setArxivError(err instanceof Error ? err.message : '拉取 arXiv 论文失败');
     } finally {
@@ -709,7 +758,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
                 二、论文所需数学工具与您个人储备的对照
               </h3>
               <ul className="space-y-1.5 text-xs text-slate-700 list-disc pl-4">
-                {currentPreAnalysis.mathPrerequisitesRequired.map((mp, idx) => (
+                {(currentPreAnalysis.mathPrerequisitesRequired || []).map((mp, idx) => (
                   <li key={idx}>
                     <MixedAcademicText text={mp} />
                   </li>
@@ -730,7 +779,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
             </div>
 
             <div className="space-y-4">
-              {currentPreAnalysis.sectionGaps.map((sec, idx) => (
+              {(currentPreAnalysis.sectionGaps || []).map((sec, idx) => (
                 <div
                   key={idx}
                   className="border border-slate-200 rounded-lg p-5 space-y-4 bg-white"
@@ -759,7 +808,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
                         ● 本节已掌握基础 (K1 · 将跳过批注)
                       </div>
                       <ul className="space-y-1 text-slate-600 list-disc pl-4">
-                        {sec.k1ConceptsToSkip.map((c, i) => (
+                        {(sec.k1ConceptsToSkip || []).map((c, i) => (
                           <li key={i}>
                             <MixedAcademicText text={c} />
                           </li>
@@ -772,7 +821,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
                         ▲ 本节陌生知识缺口 (K3 · 重点补充推导)
                       </div>
                       <ul className="space-y-1 text-slate-800 list-disc pl-4">
-                        {sec.k3UnknownGaps.map((c, i) => (
+                        {(sec.k3UnknownGaps || []).map((c, i) => (
                           <li key={i}>
                             <MixedAcademicText text={c} />
                           </li>
@@ -784,9 +833,9 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
                       <div className="font-semibold text-blue-900">
                         ◆ 论文专属核心机制 (K4 · 深度拆解)
                       </div>
-                      {sec.k4PaperSpecificInnovations.length > 0 ? (
+                      {(sec.k4PaperSpecificInnovations || []).length > 0 ? (
                         <ul className="space-y-1 text-slate-800 list-disc pl-4">
-                          {sec.k4PaperSpecificInnovations.map((c, i) => (
+                          {(sec.k4PaperSpecificInnovations || []).map((c, i) => (
                             <li key={i}>
                               <MixedAcademicText text={c} />
                             </li>
@@ -909,13 +958,13 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
             </div>
           </div>
 
-          {currentPreAnalysis.groundingSources.length > 0 && (
+          {(currentPreAnalysis.groundingSources || []).length > 0 && (
             <div className="pt-4 border-t border-slate-200 space-y-2">
               <div className="text-xs font-mono-tabular text-slate-500">
                 本论文预分析联网核验的权威文献源：
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {currentPreAnalysis.groundingSources.map((src, idx) => (
+                {(currentPreAnalysis.groundingSources || []).map((src, idx) => (
                   <div
                     key={idx}
                     className="p-3 bg-slate-50 border border-slate-200 rounded text-xs flex items-start justify-between gap-3"
@@ -950,6 +999,57 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
             />
           )}
 
+          {/* Breakpoint Resume Banner when an interrupted translation snapshot exists */}
+          {!isTranslatingFull &&
+            inProgressTranslation &&
+            (() => {
+              const completedCount = inProgressTranslation.outcomes.filter(
+                (o) =>
+                  o.status === 'completed' || o.status === 'degraded' || o.status === 'failed'
+              ).length;
+              const totalCount = inProgressTranslation.chunks.length;
+              if (completedCount === 0 || completedCount >= totalCount) return null;
+              return (
+                <div
+                  data-testid="resume-translation-banner"
+                  className="p-4 bg-amber-50/90 border border-amber-300 rounded-md flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                >
+                  <div className="space-y-1">
+                    <div className="font-semibold text-amber-950">
+                      ● 检测到未完成的分节翻译进度：《
+                      {inProgressTranslation.titleZh || inProgressTranslation.titleEn}》（已自动保存{' '}
+                      {completedCount} / {totalCount} 节）
+                    </div>
+                    <div className="text-amber-800">
+                      您可以直接前往阅读已译完的 {completedCount} 节内容，或点击右侧按钮从第{' '}
+                      {completedCount + 1} 节继续断点续译（无需重头翻译）。
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {hasPartialTranslatedDocument && onSwitchToTranslationTab && (
+                      <button
+                        type="button"
+                        onClick={onSwitchToTranslationTab}
+                        className="px-3 py-2 bg-white hover:bg-amber-100 text-amber-950 border border-amber-300 font-medium rounded-md transition-colors cursor-pointer"
+                      >
+                        阅读已译 {completedCount} 节文稿
+                      </button>
+                    )}
+                    {onResumeIncompleteTranslation && (
+                      <button
+                        type="button"
+                        onClick={onResumeIncompleteTranslation}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md transition-colors cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>从第 {completedCount + 1} 节继续续译</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
           {isTranslatingFull && translationProgress && (
             <div
               data-testid="chunked-translation-progress"
@@ -959,25 +1059,33 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
                 <div className="flex items-center gap-2 font-semibold text-slate-900">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
                   <span>
-                    正在分节深度翻译防截断流水线：{translationProgress.currentSectionLabel}
+                    正在分节深度翻译（边译边存防丢失流水线）：{translationProgress.currentSectionLabel}
                   </span>
                 </div>
-                <span className="font-mono-tabular text-blue-700 font-semibold">
-                  已完成 {translationProgress.currentChunk} / {translationProgress.totalChunks} 节
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="font-mono-tabular text-blue-700 font-semibold">
+                    已完成 {translationProgress.currentChunk} / {translationProgress.totalChunks} 节
+                  </span>
+                  {translationProgress.currentChunk >= 1 &&
+                    hasPartialTranslatedDocument &&
+                    onSwitchToTranslationTab && (
+                      <button
+                        type="button"
+                        onClick={onSwitchToTranslationTab}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded transition-colors cursor-pointer"
+                      >
+                        <span>边译边读：先看已译 {translationProgress.currentChunk} 节</span>
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
+                    )}
+                </div>
               </div>
 
-              <div className="w-full h-1.5 bg-slate-200 rounded overflow-hidden">
-                <div
-                  className="h-full bg-blue-600 transition-all duration-300"
-                  style={{
-                    width: `${Math.round(
-                      (translationProgress.currentChunk / Math.max(1, translationProgress.totalChunks)) *
-                        100
-                    )}%`,
-                  }}
-                />
-              </div>
+              <progress
+                value={translationProgress.currentChunk}
+                max={Math.max(1, translationProgress.totalChunks)}
+                className="w-full h-2 accent-blue-600 rounded overflow-hidden block"
+              />
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-[11px] font-mono-tabular">
                 {translationProgress.chunks.map((c) => (
@@ -998,13 +1106,13 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
                     </span>
                     <span className="shrink-0">
                       {c.status === 'completed'
-                        ? '● 完成'
+                        ? '● 已存'
                         : c.status === 'running'
                         ? '⟳ 翻译中'
                         : c.status === 'degraded'
-                        ? '▲ 降级'
+                        ? '▲ 降级已存'
                         : c.status === 'failed'
-                        ? '◆ 失败'
+                        ? '◆ 失败已存'
                         : '○ 待译'}
                     </span>
                   </div>

@@ -246,3 +246,111 @@ test('splitAcademicParagraphIntoSentences splits Chinese and English sentences w
   assert.ok(enSentences[0]?.startsWith('As shown in Eq. (12)'));
   assert.ok(enSentences[1]?.startsWith('Consequently, spurious drift'));
 });
+
+test('upsertArchivedPaper, removeArchivedPaper, and normalizePersistedWorkspaceState manage multi-paper archive and sanitize missing arrays', async () => {
+  const { upsertArchivedPaper, removeArchivedPaper } = await import('./workspacePersistence');
+
+  const corruptedDoc = {
+    ...samplePaper,
+    paperId: 'paper-corrupted-1',
+    sections: [
+      {
+        sectionNumber: '1',
+        titleZh: '损坏段落测试',
+        titleEn: 'Corrupted Section',
+        paragraphs: [
+          {
+            id: 'p-bad-1',
+            paragraphIndex: 1,
+            statementType: '正文论述',
+            originalEnExcerpt: 'Raw text',
+            translatedZhText: '译文文本',
+            // annotations is undefined here!
+          },
+        ],
+      },
+    ],
+  } as any;
+
+  let archive = upsertArchivedPaper([], {
+    paperId: 'paper-corrupted-1',
+    titleZh: '第一篇归档论文',
+    titleEn: 'First Archived Paper',
+    authors: 'Author A',
+    arxivIdOrDoi: 'arXiv:2401.11111',
+    savedAt: '2026-11-16T10:00:00Z',
+    annotationDetailLevel: 3,
+    completedChunks: 2,
+    totalChunks: 4,
+    preAnalysis: null,
+    document: corruptedDoc,
+    paperRawText: 'Raw text',
+  });
+
+  assert.equal(archive.length, 1);
+  assert.ok(Array.isArray(archive[0].document.sections[0].paragraphs[0].annotations));
+
+  // Upserting the same paperId updates it in place rather than duplicating
+  archive = upsertArchivedPaper(archive, {
+    ...archive[0],
+    completedChunks: 4,
+    totalChunks: 4,
+  });
+  assert.equal(archive.length, 1);
+  assert.equal(archive[0].completedChunks, 4);
+
+  const normalizedState = normalizePersistedWorkspaceState({
+    materials: [],
+    knowledgeNodes: [],
+    report: null,
+    currentPreAnalysis: null,
+    currentDocument: corruptedDoc,
+    paperTitleEn: 'First Archived Paper',
+    paperAuthors: 'Author A',
+    paperArxivId: 'arXiv:2401.11111',
+    paperRawText: 'Raw text',
+    isPreAnalysisConfirmed: true,
+    feedbackHistory: [],
+    savedPapersArchive: archive,
+    inProgressTranslation: {
+      paperId: 'paper-corrupted-1',
+      titleEn: 'First Archived Paper',
+      titleZh: '第一篇归档论文',
+      authors: 'Author A',
+      arxivIdOrDoi: 'arXiv:2401.11111',
+      rawTextHash: '10:Raw text',
+      annotationDetailLevel: 3,
+      chunks: [
+        {
+          chunkIndex: 0,
+          totalChunks: 2,
+          sectionNumber: '1',
+          sectionTitleEn: 'Intro',
+          rawChunkText: 'Raw text',
+          paragraphCount: 1,
+          charCount: 8,
+        },
+      ],
+      outcomes: [
+        {
+          chunkIndex: 0,
+          sectionNumber: '1',
+          sectionTitleEn: 'Intro',
+          status: 'running', // running should normalize to 'pending' on reload so it can resume
+        },
+      ],
+      updatedAt: '2026-11-16T10:00:00Z',
+    },
+  });
+
+  assert.ok(normalizedState);
+  assert.ok(
+    Array.isArray(normalizedState.currentDocument?.sections[0].paragraphs[0].annotations)
+  );
+  assert.equal(normalizedState.savedPapersArchive?.length, 1);
+  assert.equal(normalizedState.inProgressTranslation?.outcomes[0].status, 'pending');
+
+  const afterRemove = removeArchivedPaper(archive, 'paper-corrupted-1');
+  assert.equal(afterRemove.length, 0);
+});
+

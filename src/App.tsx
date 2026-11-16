@@ -22,6 +22,8 @@ import {
   ChunkTranslationOutcome,
   TranslationProgressState,
   PaperSectionChunk,
+  InProgressTranslationSnapshot,
+  ArchivedPaperEntry,
 } from './types/physics';
 import {
   applyDynamicKnowledgeFeedback,
@@ -33,6 +35,8 @@ import {
   buildFallbackSectionFromChunk,
   mergeTranslatedSectionChunks,
   getRecommendedChunkBudget,
+  normalizeTranslatedPaperDocument,
+  normalizePrecisionAnnotation,
 } from './utils/paperChunker';
 import {
   DEFAULT_ANNOTATION_DETAIL_LEVEL,
@@ -44,12 +48,16 @@ import {
   saveWorkspaceState,
   clearSavedWorkspace,
   upsertPaperChatTurns,
+  upsertArchivedPaper,
+  removeArchivedPaper,
 } from './utils/workspacePersistence';
 import { KnowledgeStageView } from './components/KnowledgeStageView';
 import { PreAnalysisStageView } from './components/PreAnalysisStageView';
 import { TranslationDocumentView } from './components/TranslationDocumentView';
 import { TerminologyAndVerificationView } from './components/TerminologyAndVerificationView';
 import { SettingsModal } from './components/SettingsModal';
+import { PaperHistoryModal } from './components/PaperHistoryModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import {
   X,
   Copy,
@@ -59,6 +67,7 @@ import {
   BookOpen,
   FileText,
   SlidersHorizontal,
+  History,
 } from 'lucide-react';
 
 export type { PersistedWorkspaceState };
@@ -125,7 +134,13 @@ export default function App() {
   const [manuscriptWidthPercent, setManuscriptWidthPercent] = useState<number>(
     saved?.settings?.manuscriptWidthPercent ?? DEFAULT_MANUSCRIPT_WIDTH_PERCENT
   );
+  const [inProgressTranslation, setInProgressTranslation] =
+    useState<InProgressTranslationSnapshot | null>(saved?.inProgressTranslation ?? null);
+  const [savedPapersArchive, setSavedPapersArchive] = useState<ArchivedPaperEntry[]>(
+    saved?.savedPapersArchive ?? []
+  );
   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
+  const [historyModalOpen, setHistoryModalOpen] = useState<boolean>(false);
   const [toastBanner, setToastBanner] = useState<string | null>(null);
 
   // Export Modal State
@@ -154,6 +169,8 @@ export default function App() {
         annotationDetailLevel,
         manuscriptWidthPercent,
       },
+      inProgressTranslation,
+      savedPapersArchive,
     };
     saveWorkspaceState(stateToSave);
   }, [
@@ -174,6 +191,8 @@ export default function App() {
     derivationMindMapsByPaperId,
     annotationDetailLevel,
     manuscriptWidthPercent,
+    inProgressTranslation,
+    savedPapersArchive,
   ]);
 
   const showToast = (msg: string) => {
@@ -198,10 +217,25 @@ export default function App() {
     setPaperChatHistory({});
     setActiveParagraphByPaperId({});
     setDerivationMindMapsByPaperId({});
+    setInProgressTranslation(null);
+    setSavedPapersArchive([]);
     setAnnotationDetailLevel(DEFAULT_ANNOTATION_DETAIL_LEVEL);
     setActiveTab('knowledge');
     clearSavedWorkspace();
     showToast('已清空重置全部工作区数据，您可以从零开始录入新的阅读书目与待译论文。');
+  };
+
+  const handleAutoRepairWorkspaceState = () => {
+    setCurrentDocument((prev) => normalizeTranslatedPaperDocument(prev));
+    setSavedPapersArchive((prev) =>
+      (prev || [])
+        .map((entry) => {
+          const normDoc = normalizeTranslatedPaperDocument(entry.document);
+          return normDoc ? { ...entry, document: normDoc } : null;
+        })
+        .filter((e): e is ArchivedPaperEntry => e !== null)
+    );
+    showToast('已完成文稿数据结构自动修复与缺省数组补齐，您可以继续正常阅读。');
   };
 
   const handleAddMaterial = (newMat: ReadingMaterial, newNodes: KnowledgeNode[]) => {
@@ -354,17 +388,18 @@ export default function App() {
     paragraphId: string,
     newAnnotation: PrecisionAnnotation
   ) => {
+    const safeNewAnn = normalizePrecisionAnnotation(newAnnotation, `ann-${paragraphId}-99`);
     setCurrentDocument((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
-        sections: prev.sections.map((sec) => ({
+        sections: (prev.sections || []).map((sec) => ({
           ...sec,
-          paragraphs: sec.paragraphs.map((p) =>
+          paragraphs: (sec.paragraphs || []).map((p) =>
             p.id === paragraphId
               ? {
                   ...p,
-                  annotations: [...p.annotations, newAnnotation],
+                  annotations: [...(p.annotations || []), safeNewAnn],
                 }
               : p
           ),
@@ -372,7 +407,7 @@ export default function App() {
       };
     });
     showToast(
-      `已将 Gemini 伴读导师针对「${newAnnotation.targetConceptZh}」的补充推导直接加入正文段落批注中！`
+      `已将 Gemini 伴读导师针对「${safeNewAnn.targetConceptZh}」的补充推导直接加入正文段落批注中！`
     );
   };
 
@@ -382,26 +417,53 @@ export default function App() {
     showToast('论文预分析与逐章知识缺口诊断已完成！请核对预分析方案后点击确认开始全文深度翻译。');
   };
 
-  const handleConfirmAndTranslate = async () => {
-    if (!currentPreAnalysis) return;
+  const executeChunkedTranslation = async (resumeFromSnapshot: boolean = false) => {
+    if (!currentPreAnalysis && !inProgressTranslation) return;
     setIsPreAnalysisConfirmed(true);
     setCurrentPreAnalysis((prev) => (prev ? { ...prev, confirmedByUser: true } : null));
     setTranslationError(null);
 
-    const resolvedTitleEn = paperTitleEn.trim() || currentPreAnalysis.titleEn;
-    const resolvedAuthors = paperAuthors.trim() || currentPreAnalysis.authors;
-    const resolvedArxivId = paperArxivId.trim() || currentPreAnalysis.arxivIdOrDoi;
+    const resolvedPaperId =
+      (resumeFromSnapshot && inProgressTranslation?.paperId) ||
+      currentPreAnalysis?.paperId ||
+      currentDocument?.paperId ||
+      `doc-${Date.now()}`;
+    const resolvedTitleEn =
+      (resumeFromSnapshot && inProgressTranslation?.titleEn) ||
+      paperTitleEn.trim() ||
+      currentPreAnalysis?.titleEn ||
+      'Theoretical Physics Manuscript';
+    const resolvedTitleZh =
+      (resumeFromSnapshot && inProgressTranslation?.titleZh) ||
+      currentPreAnalysis?.titleZh ||
+      resolvedTitleEn;
+    const resolvedAuthors =
+      (resumeFromSnapshot && inProgressTranslation?.authors) ||
+      paperAuthors.trim() ||
+      currentPreAnalysis?.authors ||
+      '';
+    const resolvedArxivId =
+      (resumeFromSnapshot && inProgressTranslation?.arxivIdOrDoi) ||
+      paperArxivId.trim() ||
+      currentPreAnalysis?.arxivIdOrDoi ||
+      '';
     const sourceTextForChunking =
       paperRawText.trim() ||
-      currentPreAnalysis.coreInnovationSummary ||
-      currentPreAnalysis.titleEn;
+      currentPreAnalysis?.coreInnovationSummary ||
+      resolvedTitleEn;
+    const rawTextHash = `${sourceTextForChunking.length}:${sourceTextForChunking.slice(0, 120)}`;
 
     const chunkBudget = getRecommendedChunkBudget(annotationDetailLevel);
-    const chunks = splitPaperIntoSectionChunks(sourceTextForChunking, {
-      maxChunkChars: chunkBudget.maxChunkChars,
-      maxParagraphsPerChunk: chunkBudget.maxParagraphsPerChunk,
-      fallbackTitleEn: resolvedTitleEn,
-    });
+    const chunks =
+      resumeFromSnapshot &&
+      inProgressTranslation &&
+      inProgressTranslation.chunks.length > 0
+        ? inProgressTranslation.chunks
+        : splitPaperIntoSectionChunks(sourceTextForChunking, {
+            maxChunkChars: chunkBudget.maxChunkChars,
+            maxParagraphsPerChunk: chunkBudget.maxParagraphsPerChunk,
+            fallbackTitleEn: resolvedTitleEn,
+          });
 
     if (chunks.length === 0) {
       setTranslationError('未检测到可用于分节翻译的有效论文文本，请返回补充论文内容后重试。');
@@ -409,29 +471,53 @@ export default function App() {
     }
 
     setIsTranslatingFull(true);
-    const outcomes: ChunkTranslationOutcome[] = chunks.map((chunk) => ({
-      chunkIndex: chunk.chunkIndex,
-      sectionNumber: chunk.sectionNumber,
-      sectionTitleEn: chunk.sectionTitleEn,
-      status: 'pending',
-    }));
+    const outcomes: ChunkTranslationOutcome[] =
+      resumeFromSnapshot &&
+      inProgressTranslation &&
+      inProgressTranslation.outcomes.length === chunks.length
+        ? inProgressTranslation.outcomes.map((o) => ({ ...o }))
+        : chunks.map((chunk) => ({
+            chunkIndex: chunk.chunkIndex,
+            sectionNumber: chunk.sectionNumber,
+            sectionTitleEn: chunk.sectionTitleEn,
+            status: 'pending',
+          }));
+
+    const initialDoneCount = outcomes.filter(
+      (o) => o.status === 'completed' || o.status === 'degraded' || o.status === 'failed'
+    ).length;
 
     setTranslationProgress({
-      currentChunk: 0,
+      currentChunk: initialDoneCount,
       totalChunks: chunks.length,
-      currentSectionLabel: `准备分节翻译：§${chunks[0].sectionNumber} ${chunks[0].sectionTitleEn}`,
+      currentSectionLabel:
+        initialDoneCount < chunks.length
+          ? `准备分节翻译：§${chunks[initialDoneCount].sectionNumber} ${chunks[initialDoneCount].sectionTitleEn}`
+          : '全部章节处理完毕',
       chunks: [...outcomes],
     });
 
     try {
       for (let i = 0; i < chunks.length; i++) {
+        // When resuming from a snapshot, skip chunks that already succeeded or were saved
+        if (
+          resumeFromSnapshot &&
+          (outcomes[i]?.status === 'completed' || outcomes[i]?.status === 'degraded') &&
+          outcomes[i]?.section
+        ) {
+          continue;
+        }
+
         const chunk = chunks[i];
         outcomes[i] = {
           ...outcomes[i],
           status: 'running',
         };
+        const currentDoneBefore = outcomes.filter(
+          (o) => o.status === 'completed' || o.status === 'degraded' || o.status === 'failed'
+        ).length;
         setTranslationProgress({
-          currentChunk: i,
+          currentChunk: currentDoneBefore,
           totalChunks: chunks.length,
           currentSectionLabel: `§${chunk.sectionNumber} ${chunk.sectionTitleEn}`,
           chunks: [...outcomes],
@@ -443,7 +529,7 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               titleEn: resolvedTitleEn,
-              titleZh: currentPreAnalysis.titleZh,
+              titleZh: resolvedTitleZh,
               authors: resolvedAuthors,
               arxivIdOrDoi: resolvedArxivId,
               chunk,
@@ -508,39 +594,120 @@ export default function App() {
           };
         }
 
+        const completedOutcomesSoFar = outcomes.filter((o) => Boolean(o.section));
+        const doneCountNow = completedOutcomesSoFar.length;
+
         setTranslationProgress({
-          currentChunk: i + 1,
+          currentChunk: doneCountNow,
           totalChunks: chunks.length,
           currentSectionLabel: `§${chunk.sectionNumber} ${chunk.sectionTitleEn}`,
           chunks: [...outcomes],
         });
+
+        // Incremental Persistence: Immediately build & save partial document after every finished chunk
+        if (completedOutcomesSoFar.length > 0) {
+          const partialDoc = mergeTranslatedSectionChunks({
+            baseMeta: {
+              paperId: resolvedPaperId,
+              titleZh: resolvedTitleZh,
+              titleEn: resolvedTitleEn,
+              authors: resolvedAuthors,
+              institutionOrJournal: 'arXiv / Peer-Reviewed Preprint',
+              arxivIdOrDoi: resolvedArxivId,
+              abstractZh:
+                currentPreAnalysis?.coreInnovationSummary ||
+                currentDocument?.abstractZh ||
+                '',
+              groundingSources:
+                currentPreAnalysis?.groundingSources ||
+                currentDocument?.groundingSources ||
+                [],
+            },
+            chunkOutcomes: completedOutcomesSoFar,
+          });
+
+          setCurrentDocument(partialDoc);
+          const snapshotNow: InProgressTranslationSnapshot = {
+            paperId: resolvedPaperId,
+            titleEn: resolvedTitleEn,
+            titleZh: partialDoc.titleZh || resolvedTitleZh,
+            authors: resolvedAuthors,
+            arxivIdOrDoi: resolvedArxivId,
+            rawTextHash,
+            annotationDetailLevel,
+            chunks,
+            outcomes: [...outcomes],
+            updatedAt: new Date().toISOString(),
+          };
+          setInProgressTranslation(snapshotNow);
+
+          setSavedPapersArchive((prevArchive) =>
+            upsertArchivedPaper(prevArchive, {
+              paperId: resolvedPaperId,
+              titleZh: partialDoc.titleZh || resolvedTitleZh,
+              titleEn: resolvedTitleEn,
+              authors: resolvedAuthors,
+              arxivIdOrDoi: resolvedArxivId,
+              savedAt: new Date().toISOString(),
+              annotationDetailLevel,
+              completedChunks: doneCountNow,
+              totalChunks: chunks.length,
+              preAnalysis: currentPreAnalysis,
+              document: partialDoc,
+              paperRawText: sourceTextForChunking,
+            })
+          );
+        }
       }
 
       const mergedDoc = mergeTranslatedSectionChunks({
         baseMeta: {
-          paperId: currentPreAnalysis.paperId || `doc-${Date.now()}`,
-          titleZh: currentPreAnalysis.titleZh,
+          paperId: resolvedPaperId,
+          titleZh: resolvedTitleZh,
           titleEn: resolvedTitleEn,
           authors: resolvedAuthors,
           institutionOrJournal: 'arXiv / Peer-Reviewed Preprint',
           arxivIdOrDoi: resolvedArxivId,
-          abstractZh: currentPreAnalysis.coreInnovationSummary,
-          groundingSources: currentPreAnalysis.groundingSources,
+          abstractZh:
+            currentPreAnalysis?.coreInnovationSummary ||
+            currentDocument?.abstractZh ||
+            '',
+          groundingSources:
+            currentPreAnalysis?.groundingSources ||
+            currentDocument?.groundingSources ||
+            [],
         },
         chunkOutcomes: outcomes,
       });
 
       const activeProf = getAnnotationDetailProfile(annotationDetailLevel);
       setCurrentDocument(mergedDoc);
+      setInProgressTranslation(null);
+      setSavedPapersArchive((prevArchive) =>
+        upsertArchivedPaper(prevArchive, {
+          paperId: resolvedPaperId,
+          titleZh: mergedDoc.titleZh,
+          titleEn: resolvedTitleEn,
+          authors: resolvedAuthors,
+          arxivIdOrDoi: resolvedArxivId,
+          savedAt: new Date().toISOString(),
+          annotationDetailLevel,
+          completedChunks: chunks.length,
+          totalChunks: chunks.length,
+          preAnalysis: currentPreAnalysis,
+          document: mergedDoc,
+          paperRawText: sourceTextForChunking,
+        })
+      );
       setActiveTab('translation');
 
       if (mergedDoc.generationMeta?.degraded) {
         showToast(
-          `▲ 已完成分节处理并进入文稿，但部分章节已降级保留原文（${mergedDoc.generationMeta.reason || 'Gemini 服务降级'}），可在文稿页逐节重试。`
+          `▲ 已完成分节处理并归档至「历史论文库」，部分章节已降级保留原文（${mergedDoc.generationMeta.reason || 'Gemini 服务降级'}），可在文稿页逐节重试。`
         );
       } else {
         showToast(
-          `预分析方案已确认！已按「Lv.${activeProf.level} ${activeProf.shortLabel}」完成全 ${chunks.length} 节纯中文深度学术翻译与 K1–K4 精准批注。`
+          `预分析方案已确认！已按「Lv.${activeProf.level} ${activeProf.shortLabel}」完成全 ${chunks.length} 节纯中文深度翻译与批注，并自动归档至「历史论文库」。`
         );
       }
     } catch (err) {
@@ -553,6 +720,60 @@ export default function App() {
     } finally {
       setIsTranslatingFull(false);
     }
+  };
+
+  const handleConfirmAndTranslate = async () => {
+    await executeChunkedTranslation(false);
+  };
+
+  const handleResumeIncompleteTranslation = async () => {
+    await executeChunkedTranslation(true);
+  };
+
+  const handleSelectArchivedPaper = (entry: ArchivedPaperEntry) => {
+    const normalizedDoc = normalizeTranslatedPaperDocument(entry.document);
+    if (!normalizedDoc) return;
+    setPaperTitleEn(entry.titleEn);
+    setPaperAuthors(entry.authors);
+    setPaperArxivId(entry.arxivIdOrDoi);
+    if (entry.paperRawText) {
+      setPaperRawText(entry.paperRawText);
+    }
+    if (entry.preAnalysis) {
+      setCurrentPreAnalysis(entry.preAnalysis);
+      setIsPreAnalysisConfirmed(true);
+    }
+    setCurrentDocument(normalizedDoc);
+    setActiveTab('translation');
+    showToast(`已从历史论文库加载《${entry.titleZh}》（已译 ${entry.completedChunks}/${entry.totalChunks} 节）。`);
+  };
+
+  const handleDeleteArchivedPaper = (paperId: string) => {
+    const target = savedPapersArchive.find((p) => p.paperId === paperId);
+    setSavedPapersArchive((prev) => removeArchivedPaper(prev, paperId));
+    if (target) {
+      showToast(`已从历史论文库中移除《${target.titleZh}》。`);
+    }
+  };
+
+  const handleExportArchivedPaperMarkdown = (entry: ArchivedPaperEntry) => {
+    const md = exportAcademicMarkdown(
+      entry.document,
+      knowledgeNodes,
+      report,
+      entry.preAnalysis,
+      false
+    );
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${entry.titleZh || '理论物理论文中文批注文稿'}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`已导出《${entry.titleZh}》的 Markdown + LaTeX 学术批注文稿。`);
   };
 
   const handleRetryDegradedSections = async (chunkIndices?: number[]) => {
@@ -761,270 +982,333 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900">
-      {/* Strict 3-Zone Top Navigation Bar Contract */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-slate-200 px-4 sm:px-6 py-3.5">
-        <div className="max-w-[1380px] mx-auto flex flex-wrap md:flex-nowrap items-center justify-between gap-3 sm:gap-6">
-          {/* Zone 1: Single text element wordmark */}
-          <a
-            href="#top"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveTab('knowledge');
-            }}
-            className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
-          >
-            PhysicaAnnotate
-          </a>
+    <ErrorBoundary
+      fallbackTitle="PhysicaAnnotate 工作台捕获到意外渲染异常"
+      onAutoRepairAndReset={handleAutoRepairWorkspaceState}
+      onExportBackup={handleDownloadMarkdownFile}
+    >
+      <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900">
+        {/* Strict 3-Zone Top Navigation Bar Contract — Responsive across 375px / 768px / 1440px */}
+        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-slate-200 px-3 sm:px-6 py-2 sm:py-3">
+          <div className="max-w-[1380px] mx-auto flex flex-wrap md:flex-nowrap items-center justify-between gap-2 md:gap-4 lg:gap-6">
+            {/* Zone 1: Single text element wordmark */}
+            <a
+              href="#top"
+              onClick={(e) => {
+                e.preventDefault();
+                setActiveTab('knowledge');
+              }}
+              className="text-base sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            >
+              PhysicaAnnotate
+            </a>
 
-          {/* Zone 2: 4 concise single-line text navigation links */}
-          <nav
-            aria-label="主工作流导航"
-            className="order-3 w-full pt-2.5 border-t border-slate-100 md:order-none md:w-auto md:pt-0 md:border-t-0 flex items-center gap-5 sm:gap-6 text-sm font-medium text-slate-600 overflow-x-auto"
-          >
-            <button
-              type="button"
-              onClick={() => setActiveTab('knowledge')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeTab === 'knowledge'
-                  ? 'text-blue-600 font-semibold underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
+            {/* Zone 2: 4 concise single-line text navigation links */}
+            <nav
+              aria-label="主工作流导航"
+              className="order-3 w-full pt-1.5 border-t border-slate-100 md:order-none md:w-auto md:pt-0 md:border-t-0 flex items-center justify-between sm:justify-start gap-2 sm:gap-4 lg:gap-6 text-xs sm:text-sm font-medium text-slate-600 overflow-x-auto"
             >
-              1. 知识背景建模
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('pre_analysis')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeTab === 'pre_analysis'
-                  ? 'text-blue-600 font-semibold underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              2. 论文预分析与缺口
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('translation')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeTab === 'translation'
-                  ? 'text-blue-600 font-semibold underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              3. 深度翻译与批注文稿
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('verification')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeTab === 'verification'
-                  ? 'text-blue-600 font-semibold underline underline-offset-8 decoration-2'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              4. 术语与文献核验
-            </button>
-          </nav>
+              <button
+                type="button"
+                onClick={() => setActiveTab('knowledge')}
+                className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeTab === 'knowledge'
+                    ? 'text-blue-600 font-semibold underline underline-offset-4 sm:underline-offset-8 decoration-2'
+                    : 'hover:text-slate-900'
+                }`}
+              >
+                <span className="xl:hidden">1. 知识建模</span>
+                <span className="hidden xl:inline">1. 知识背景建模</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('pre_analysis')}
+                className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeTab === 'pre_analysis'
+                    ? 'text-blue-600 font-semibold underline underline-offset-4 sm:underline-offset-8 decoration-2'
+                    : 'hover:text-slate-900'
+                }`}
+              >
+                <span className="xl:hidden">2. 预分析</span>
+                <span className="hidden xl:inline">2. 论文预分析与缺口</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('translation')}
+                className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeTab === 'translation'
+                    ? 'text-blue-600 font-semibold underline underline-offset-4 sm:underline-offset-8 decoration-2'
+                    : 'hover:text-slate-900'
+                }`}
+              >
+                <span className="xl:hidden">3. 批注文稿</span>
+                <span className="hidden xl:inline">3. 深度翻译与批注文稿</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('verification')}
+                className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeTab === 'verification'
+                    ? 'text-blue-600 font-semibold underline underline-offset-4 sm:underline-offset-8 decoration-2'
+                    : 'hover:text-slate-900'
+                }`}
+              >
+                <span className="xl:hidden">4. 术语核验</span>
+                <span className="hidden xl:inline">4. 术语与文献核验</span>
+              </button>
+            </nav>
 
-          {/* Zone 3: Settings & primary export action */}
-          <div className="shrink-0 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setSettingsModalOpen(true)}
-              aria-label={`打开全局设置（当前批注详细程度 Lv.${annotationDetailLevel}）`}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5 text-blue-600" />
-              <span>设置</span>
-              <span className="hidden sm:inline font-mono-tabular text-[11px] text-slate-500">
-                Lv.{annotationDetailLevel}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setExportModalOpen(true)}
-              className="px-3.5 sm:px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-md hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              导出中文学术文稿
-            </button>
+            {/* Zone 3: History Archive, Settings & Primary Export Action */}
+            <div className="shrink-0 flex items-center gap-1.5 sm:gap-2">
+              <button
+                type="button"
+                onClick={() => setHistoryModalOpen(true)}
+                aria-label={`打开历史精读论文库（已归档 ${savedPapersArchive.length} 篇）`}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <History className="w-3.5 h-3.5 text-blue-600" />
+                <span className="hidden sm:inline">历史论文</span>
+                <span className="font-mono-tabular text-[11px] text-slate-600">
+                  ({savedPapersArchive.length})
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsModalOpen(true)}
+                aria-label={`打开全局设置（当前批注详细程度 Lv.${annotationDetailLevel}）`}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-blue-600" />
+                <span>设置</span>
+                <span className="hidden lg:inline font-mono-tabular text-[11px] text-slate-500">
+                  Lv.{annotationDetailLevel}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setExportModalOpen(true)}
+                className="px-2.5 sm:px-3.5 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-md hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <span className="sm:hidden">导出文稿</span>
+                <span className="hidden sm:inline">导出中文学术文稿</span>
+              </button>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* Dynamic Feedback Notification Bar */}
-      {toastBanner && (
-        <div
-          role="status"
-          className="bg-slate-900 text-white px-6 py-2.5 text-xs border-b border-slate-800"
-        >
-          <div className="max-w-[1380px] mx-auto flex items-center justify-between gap-4">
-            <span>{toastBanner}</span>
-            <button
-              type="button"
-              onClick={() => setToastBanner(null)}
-              aria-label="关闭通知"
-              className="text-slate-400 hover:text-white cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+        {/* Dynamic Feedback Notification Bar */}
+        {toastBanner && (
+          <div
+            role="status"
+            className="bg-slate-900 text-white px-6 py-2.5 text-xs border-b border-slate-800"
+          >
+            <div className="max-w-[1380px] mx-auto flex items-center justify-between gap-4">
+              <span>{toastBanner}</span>
+              <button
+                type="button"
+                onClick={() => setToastBanner(null)}
+                aria-label="关闭通知"
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
-        </div>
-      )}
-
-      {/* Main Content Container */}
-      <main className="flex-1 max-w-[1380px] w-full mx-auto px-4 sm:px-6 py-8">
-        {activeTab === 'knowledge' && (
-          <KnowledgeStageView
-            materials={materials}
-            knowledgeNodes={knowledgeNodes}
-            report={report}
-            isGeneratingReport={isGeneratingReport}
-            reportError={reportError}
-            onAddMaterial={handleAddMaterial}
-            onUpdateMaterialBreakdown={handleUpdateMaterialBreakdown}
-            onRemoveMaterial={handleRemoveMaterial}
-            onAddCustomNode={handleAddCustomNode}
-            onRemoveNode={handleRemoveNode}
-            onUpdateNodeLevel={handleUpdateNodeLevel}
-            onGenerateReport={handleGenerateReport}
-            onProceedToPreAnalysis={() => setActiveTab('pre_analysis')}
-            onClearAllWorkspace={handleClearAllWorkspace}
-          />
         )}
 
-        {activeTab === 'pre_analysis' && (
-          <PreAnalysisStageView
-            materials={materials}
-            knowledgeNodes={knowledgeNodes}
-            currentPreAnalysis={currentPreAnalysis}
-            paperTitleEn={paperTitleEn}
-            paperAuthors={paperAuthors}
-            paperArxivId={paperArxivId}
-            paperRawText={paperRawText}
-            onChangePaperTitle={setPaperTitleEn}
-            onChangePaperAuthors={setPaperAuthors}
-            onChangePaperArxivId={setPaperArxivId}
-            onChangePaperRawText={setPaperRawText}
-            isPreAnalysisConfirmed={isPreAnalysisConfirmed}
-            isTranslatingFull={isTranslatingFull}
-            translationProgress={translationProgress}
-            translationError={translationError}
-            onPreAnalysisGenerated={handlePreAnalysisGenerated}
-            onConfirmAndTranslate={handleConfirmAndTranslate}
-            onBackToKnowledgeStage={() => setActiveTab('knowledge')}
-            annotationDetailLevel={annotationDetailLevel}
-            onOpenSettings={() => setSettingsModalOpen(true)}
-          />
-        )}
-
-        {activeTab === 'translation' && (
-          <div className="space-y-6">
-            {!currentDocument ? (
-              <section className="bg-white border border-slate-200 rounded-lg p-10 text-center max-w-2xl mx-auto space-y-5 my-8">
-                <div className="w-10 h-10 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center mx-auto">
-                  <FileText className="w-5 h-5" />
-                </div>
-                <div className="space-y-2">
-                  <div className="text-xs font-mono-tabular text-blue-600 font-semibold">
-                    工作流门控：未经预分析确认，不直接开始全文翻译
-                  </div>
-                  <h2 className="text-xl font-bold text-slate-900">
-                    尚未生成中文深度翻译与精准批注文稿
-                  </h2>
-                  <p className="text-sm text-slate-600 leading-relaxed">
-                    根据您的工作流规范，请先在「1. 知识背景建模」中录入您读过的教材/论文，随后在「2. 论文预分析与缺口」中导入待译英文论文并点击确认预分析方案。
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('knowledge')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-md transition-colors cursor-pointer"
-                  >
-                    <BookOpen className="w-3.5 h-3.5" />
-                    <span>前往 1. 知识背景建模</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('pre_analysis')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors cursor-pointer"
-                  >
-                    <span>前往 2. 导入论文并执行预分析</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </section>
-            ) : (
-              <TranslationDocumentView
-                document={currentDocument}
-                knowledgeNodes={knowledgeNodes}
+        {/* Main Content Container */}
+        <main className="flex-1 max-w-[1380px] w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
+          {activeTab === 'knowledge' && (
+            <ErrorBoundary
+              fallbackTitle="知识背景建模视图遇到数据格式异常"
+              onAutoRepairAndReset={handleAutoRepairWorkspaceState}
+              onExportBackup={handleDownloadMarkdownFile}
+            >
+              <KnowledgeStageView
                 materials={materials}
-                persistedChatTurns={paperChatHistory[currentDocument.paperId]}
-                onChatTurnsChange={(paperId, turns) =>
-                  setPaperChatHistory((prev) => upsertPaperChatTurns(prev, paperId, turns))
-                }
-                persistedActiveParagraphId={activeParagraphByPaperId[currentDocument.paperId]}
-                onActiveParagraphChange={(paperId, paragraphId) =>
-                  setActiveParagraphByPaperId((prev) =>
-                    prev[paperId] === paragraphId ? prev : { ...prev, [paperId]: paragraphId }
-                  )
-                }
-                persistedMindMaps={derivationMindMapsByPaperId[currentDocument.paperId]}
-                onMindMapsChange={(paperId, maps) =>
-                  setDerivationMindMapsByPaperId((prev) => ({ ...prev, [paperId]: maps }))
-                }
-                onDynamicFeedback={handleDynamicFeedback}
-                onAppendAnnotation={handleAppendAnnotationToParagraph}
-                onExportDocument={() => setExportModalOpen(true)}
-                annotationDetailLevel={annotationDetailLevel}
-                manuscriptWidthPercent={manuscriptWidthPercent}
-                onManuscriptWidthPercentChange={setManuscriptWidthPercent}
-                onOpenSettings={() => setSettingsModalOpen(true)}
-                onRetryDegradedSections={handleRetryDegradedSections}
-                retryingChunkIndices={retryingChunkIndices}
-              />
-            )}
-          </div>
-        )}
-
-        {activeTab === 'verification' && (
-          <div>
-            {!currentDocument ? (
-              <section className="bg-white border border-slate-200 rounded-lg p-10 text-center max-w-2xl mx-auto space-y-5 my-8">
-                <div className="space-y-2">
-                  <div className="text-xs font-mono-tabular text-slate-500">
-                    第七阶段 · 专业术语统一对照表与联网文献核验
-                  </div>
-                  <h2 className="text-xl font-bold text-slate-900">
-                    完成论文翻译后即可查看术语统一表与文献核验清单
-                  </h2>
-                  <p className="text-sm text-slate-600 leading-relaxed">
-                    当您完成论文预分析确认并生成中文深度批注文稿后，此处将自动汇总全文「中文术语（English Term）」首次出现位置、K1–K4 动态反馈审计日志及 arXiv / CrossRef 文献核验状态。
-                  </p>
-                </div>
-                <div className="flex justify-center pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('pre_analysis')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors cursor-pointer"
-                  >
-                    <span>前往导入待译论文</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </section>
-            ) : (
-              <TerminologyAndVerificationView
-                document={currentDocument}
-                feedbackHistory={feedbackHistory}
                 knowledgeNodes={knowledgeNodes}
+                report={report}
+                isGeneratingReport={isGeneratingReport}
+                reportError={reportError}
+                onAddMaterial={handleAddMaterial}
+                onUpdateMaterialBreakdown={handleUpdateMaterialBreakdown}
+                onRemoveMaterial={handleRemoveMaterial}
+                onAddCustomNode={handleAddCustomNode}
+                onRemoveNode={handleRemoveNode}
+                onUpdateNodeLevel={handleUpdateNodeLevel}
+                onGenerateReport={handleGenerateReport}
+                onProceedToPreAnalysis={() => setActiveTab('pre_analysis')}
+                onClearAllWorkspace={handleClearAllWorkspace}
               />
-            )}
-          </div>
-        )}
-      </main>
+            </ErrorBoundary>
+          )}
+
+          {activeTab === 'pre_analysis' && (
+            <ErrorBoundary
+              fallbackTitle="论文预分析视图遇到数据格式异常"
+              onAutoRepairAndReset={handleAutoRepairWorkspaceState}
+              onExportBackup={handleDownloadMarkdownFile}
+            >
+              <PreAnalysisStageView
+                materials={materials}
+                knowledgeNodes={knowledgeNodes}
+                currentPreAnalysis={currentPreAnalysis}
+                paperTitleEn={paperTitleEn}
+                paperAuthors={paperAuthors}
+                paperArxivId={paperArxivId}
+                paperRawText={paperRawText}
+                onChangePaperTitle={setPaperTitleEn}
+                onChangePaperAuthors={setPaperAuthors}
+                onChangePaperArxivId={setPaperArxivId}
+                onChangePaperRawText={setPaperRawText}
+                isPreAnalysisConfirmed={isPreAnalysisConfirmed}
+                isTranslatingFull={isTranslatingFull}
+                translationProgress={translationProgress}
+                translationError={translationError}
+                onPreAnalysisGenerated={handlePreAnalysisGenerated}
+                onConfirmAndTranslate={handleConfirmAndTranslate}
+                onBackToKnowledgeStage={() => setActiveTab('knowledge')}
+                annotationDetailLevel={annotationDetailLevel}
+                onOpenSettings={() => setSettingsModalOpen(true)}
+                inProgressTranslation={inProgressTranslation}
+                onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
+                hasPartialTranslatedDocument={Boolean(currentDocument)}
+                onSwitchToTranslationTab={() => setActiveTab('translation')}
+              />
+            </ErrorBoundary>
+          )}
+
+          {activeTab === 'translation' && (
+            <ErrorBoundary
+              fallbackTitle="深度翻译与批注文稿视图捕获到非标准模型字段"
+              onAutoRepairAndReset={handleAutoRepairWorkspaceState}
+              onExportBackup={handleDownloadMarkdownFile}
+            >
+              <div className="space-y-6">
+                {!currentDocument ? (
+                  <section className="bg-white border border-slate-200 rounded-lg p-10 text-center max-w-2xl mx-auto space-y-5 my-8">
+                    <div className="w-10 h-10 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center mx-auto">
+                      <FileText className="w-5 h-5" />
+                    </div>
+                    <div className="space-y-2">
+                      <div className="text-xs font-mono-tabular text-blue-600 font-semibold">
+                        工作流门控：未经预分析确认，不直接开始全文翻译
+                      </div>
+                      <h2 className="text-xl font-bold text-slate-900">
+                        尚未生成中文深度翻译与精准批注文稿
+                      </h2>
+                      <p className="text-sm text-slate-600 leading-relaxed">
+                        根据您的工作流规范，请先在「1. 知识背景建模」中录入您读过的教材/论文，随后在「2. 论文预分析与缺口」中导入待译英文论文并点击确认预分析方案。
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('knowledge')}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-md transition-colors cursor-pointer"
+                      >
+                        <BookOpen className="w-3.5 h-3.5" />
+                        <span>前往 1. 知识背景建模</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('pre_analysis')}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors cursor-pointer"
+                      >
+                        <span>前往 2. 导入论文并执行预分析</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                      {savedPapersArchive.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setHistoryModalOpen(true)}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-slate-900 hover:bg-slate-800 text-white rounded-md transition-colors cursor-pointer"
+                        >
+                          <History className="w-3.5 h-3.5" />
+                          <span>从历史论文库加载 ({savedPapersArchive.length})</span>
+                        </button>
+                      )}
+                    </div>
+                  </section>
+                ) : (
+                  <TranslationDocumentView
+                    document={currentDocument}
+                    knowledgeNodes={knowledgeNodes}
+                    materials={materials}
+                    persistedChatTurns={paperChatHistory[currentDocument.paperId]}
+                    onChatTurnsChange={(paperId, turns) =>
+                      setPaperChatHistory((prev) => upsertPaperChatTurns(prev, paperId, turns))
+                    }
+                    persistedActiveParagraphId={activeParagraphByPaperId[currentDocument.paperId]}
+                    onActiveParagraphChange={(paperId, paragraphId) =>
+                      setActiveParagraphByPaperId((prev) =>
+                        prev[paperId] === paragraphId ? prev : { ...prev, [paperId]: paragraphId }
+                      )
+                    }
+                    persistedMindMaps={derivationMindMapsByPaperId[currentDocument.paperId]}
+                    onMindMapsChange={(paperId, maps) =>
+                      setDerivationMindMapsByPaperId((prev) => ({ ...prev, [paperId]: maps }))
+                    }
+                    onDynamicFeedback={handleDynamicFeedback}
+                    onAppendAnnotation={handleAppendAnnotationToParagraph}
+                    onExportDocument={() => setExportModalOpen(true)}
+                    annotationDetailLevel={annotationDetailLevel}
+                    manuscriptWidthPercent={manuscriptWidthPercent}
+                    onManuscriptWidthPercentChange={setManuscriptWidthPercent}
+                    onOpenSettings={() => setSettingsModalOpen(true)}
+                    onRetryDegradedSections={handleRetryDegradedSections}
+                    retryingChunkIndices={retryingChunkIndices}
+                    isTranslatingFull={isTranslatingFull}
+                    inProgressTranslation={inProgressTranslation}
+                    onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
+                  />
+                )}
+              </div>
+            </ErrorBoundary>
+          )}
+
+          {activeTab === 'verification' && (
+            <ErrorBoundary
+              fallbackTitle="术语与文献核验视图遇到数据格式异常"
+              onAutoRepairAndReset={handleAutoRepairWorkspaceState}
+              onExportBackup={handleDownloadMarkdownFile}
+            >
+              <div>
+                {!currentDocument ? (
+                  <section className="bg-white border border-slate-200 rounded-lg p-10 text-center max-w-2xl mx-auto space-y-5 my-8">
+                    <div className="space-y-2">
+                      <div className="text-xs font-mono-tabular text-slate-500">
+                        第七阶段 · 专业术语统一对照表与联网文献核验
+                      </div>
+                      <h2 className="text-xl font-bold text-slate-900">
+                        完成论文翻译后即可查看术语统一表与文献核验清单
+                      </h2>
+                      <p className="text-sm text-slate-600 leading-relaxed">
+                        当您完成论文预分析确认并生成中文深度批注文稿后，此处将自动汇总全文「中文术语（English Term）」首次出现位置、K1–K4 动态反馈审计日志及 arXiv / CrossRef 文献核验状态。
+                      </p>
+                    </div>
+                    <div className="flex justify-center pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('pre_analysis')}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors cursor-pointer"
+                      >
+                        <span>前往导入待译论文</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </section>
+                ) : (
+                  <TerminologyAndVerificationView
+                    document={currentDocument}
+                    feedbackHistory={feedbackHistory}
+                    knowledgeNodes={knowledgeNodes}
+                  />
+                )}
+              </div>
+            </ErrorBoundary>
+          )}
+        </main>
 
       {/* Quiet Academic Footer */}
       <footer className="border-t border-slate-200 bg-white py-5 px-6 mt-12">
@@ -1117,6 +1401,20 @@ export default function App() {
         isTranslatingFull={isTranslatingFull}
         onRegenerateWithNewLevel={handleConfirmAndTranslate}
       />
-    </div>
+
+      {/* Multi-Paper History Archive Modal */}
+      <PaperHistoryModal
+        isOpen={historyModalOpen}
+        onClose={() => setHistoryModalOpen(false)}
+        archivedPapers={savedPapersArchive}
+        activePaperId={currentDocument?.paperId}
+        inProgressTranslation={inProgressTranslation}
+        onSelectPaper={handleSelectArchivedPaper}
+        onDeletePaper={handleDeleteArchivedPaper}
+        onExportPaperMarkdown={handleExportArchivedPaperMarkdown}
+        onResumeInProgressTranslation={handleResumeIncompleteTranslation}
+      />
+      </div>
+    </ErrorBoundary>
   );
 }

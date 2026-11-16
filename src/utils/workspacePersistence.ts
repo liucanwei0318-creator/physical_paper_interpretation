@@ -1,13 +1,21 @@
 import type {
   ActiveWorkspaceTab,
+  ArchivedPaperEntry,
+  ChunkTranslationOutcome,
   DerivationMindMapTree,
+  InProgressTranslationSnapshot,
   PaperChatTurn,
   PersistedWorkspaceState,
   TranslatedPaperDocument,
 } from '../types/physics.ts';
 import { normalizeWorkspaceSettings } from './annotationSettings.ts';
+import {
+  normalizeTranslatedPaperDocument,
+  normalizeTranslatedSection,
+} from './paperChunker.ts';
 
 export const WORKSPACE_STORAGE_KEY = 'physica_annotate_workspace_v2';
+export const MAX_ARCHIVED_PAPERS = 15;
 
 const VALID_TABS: ReadonlySet<ActiveWorkspaceTab> = new Set([
   'knowledge',
@@ -31,6 +39,124 @@ function getBrowserStorage(): StorageAdapter | null {
     return null;
   }
   return null;
+}
+
+function normalizeInProgressTranslation(
+  raw: unknown
+): InProgressTranslationSnapshot | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Partial<InProgressTranslationSnapshot>;
+  if (!Array.isArray(r.chunks) || r.chunks.length === 0) return null;
+  if (!Array.isArray(r.outcomes)) return null;
+
+  const normalizedOutcomes: ChunkTranslationOutcome[] = r.outcomes.map((o, idx) => {
+    const safeSec = o?.section
+      ? normalizeTranslatedSection(o.section, o.chunkIndex ?? idx)
+      : undefined;
+    return {
+      chunkIndex: typeof o?.chunkIndex === 'number' ? o.chunkIndex : idx,
+      sectionNumber: typeof o?.sectionNumber === 'string' ? o.sectionNumber : String(idx + 1),
+      sectionTitleEn: typeof o?.sectionTitleEn === 'string' ? o.sectionTitleEn : `Section ${idx + 1}`,
+      status:
+        o?.status === 'completed' ||
+        o?.status === 'degraded' ||
+        o?.status === 'failed' ||
+        o?.status === 'running'
+          ? o.status === 'running'
+            ? 'pending'
+            : o.status
+          : 'pending',
+      titleZh: typeof o?.titleZh === 'string' ? o.titleZh : undefined,
+      translatedAbstractZh:
+        typeof o?.translatedAbstractZh === 'string' ? o.translatedAbstractZh : undefined,
+      section: safeSec,
+      terminologyItems: Array.isArray(o?.terminologyItems) ? o.terminologyItems : [],
+      generationMeta: o?.generationMeta,
+      errorMessage: typeof o?.errorMessage === 'string' ? o.errorMessage : undefined,
+    };
+  });
+
+  return {
+    paperId: typeof r.paperId === 'string' && r.paperId.trim() ? r.paperId : 'paper-in-progress',
+    titleEn: typeof r.titleEn === 'string' ? r.titleEn : '',
+    titleZh: typeof r.titleZh === 'string' ? r.titleZh : '',
+    authors: typeof r.authors === 'string' ? r.authors : '',
+    arxivIdOrDoi: typeof r.arxivIdOrDoi === 'string' ? r.arxivIdOrDoi : '',
+    rawTextHash: typeof r.rawTextHash === 'string' ? r.rawTextHash : '',
+    annotationDetailLevel: normalizeWorkspaceSettings({
+      annotationDetailLevel: r.annotationDetailLevel,
+    }).annotationDetailLevel,
+    chunks: r.chunks,
+    outcomes: normalizedOutcomes,
+    updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : new Date().toISOString(),
+  };
+}
+
+function normalizeArchivedPaperEntry(raw: unknown): ArchivedPaperEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Partial<ArchivedPaperEntry>;
+  const normalizedDoc = normalizeTranslatedPaperDocument(r.document);
+  if (!normalizedDoc) return null;
+
+  return {
+    paperId:
+      typeof r.paperId === 'string' && r.paperId.trim()
+        ? r.paperId
+        : normalizedDoc.paperId,
+    titleZh:
+      typeof r.titleZh === 'string' && r.titleZh.trim()
+        ? r.titleZh
+        : normalizedDoc.titleZh,
+    titleEn:
+      typeof r.titleEn === 'string' && r.titleEn.trim()
+        ? r.titleEn
+        : normalizedDoc.titleEn,
+    authors: typeof r.authors === 'string' ? r.authors : normalizedDoc.authors,
+    arxivIdOrDoi:
+      typeof r.arxivIdOrDoi === 'string' ? r.arxivIdOrDoi : normalizedDoc.arxivIdOrDoi,
+    savedAt: typeof r.savedAt === 'string' ? r.savedAt : new Date().toISOString(),
+    annotationDetailLevel: normalizeWorkspaceSettings({
+      annotationDetailLevel: r.annotationDetailLevel,
+    }).annotationDetailLevel,
+    completedChunks:
+      typeof r.completedChunks === 'number'
+        ? r.completedChunks
+        : normalizedDoc.sections.length,
+    totalChunks:
+      typeof r.totalChunks === 'number'
+        ? r.totalChunks
+        : normalizedDoc.chunkStatusSummary?.totalChunks || normalizedDoc.sections.length,
+    preAnalysis: r.preAnalysis ?? null,
+    document: normalizedDoc,
+    paperRawText: typeof r.paperRawText === 'string' ? r.paperRawText : '',
+  };
+}
+
+export function upsertArchivedPaper(
+  archive: ArchivedPaperEntry[],
+  newEntry: ArchivedPaperEntry
+): ArchivedPaperEntry[] {
+  const safeArchive = Array.isArray(archive) ? archive : [];
+  const normalizedNew = normalizeArchivedPaperEntry(newEntry);
+  if (!normalizedNew) return safeArchive;
+
+  const filtered = safeArchive.filter(
+    (item) =>
+      item.paperId !== normalizedNew.paperId &&
+      !(
+        normalizedNew.titleEn &&
+        item.titleEn.toLowerCase() === normalizedNew.titleEn.toLowerCase()
+      )
+  );
+  return [normalizedNew, ...filtered].slice(0, MAX_ARCHIVED_PAPERS);
+}
+
+export function removeArchivedPaper(
+  archive: ArchivedPaperEntry[],
+  paperId: string
+): ArchivedPaperEntry[] {
+  if (!Array.isArray(archive)) return [];
+  return archive.filter((item) => item.paperId !== paperId);
 }
 
 export function normalizePersistedWorkspaceState(
@@ -88,12 +214,19 @@ export function normalizePersistedWorkspaceState(
     }
   }
 
+  const safeArchive: ArchivedPaperEntry[] = Array.isArray(candidate.savedPapersArchive)
+    ? candidate.savedPapersArchive
+        .map((entry) => normalizeArchivedPaperEntry(entry))
+        .filter((entry): entry is ArchivedPaperEntry => entry !== null)
+        .slice(0, MAX_ARCHIVED_PAPERS)
+    : [];
+
   return {
     materials: Array.isArray(candidate.materials) ? candidate.materials : [],
     knowledgeNodes: Array.isArray(candidate.knowledgeNodes) ? candidate.knowledgeNodes : [],
     report: candidate.report ?? null,
     currentPreAnalysis: candidate.currentPreAnalysis ?? null,
-    currentDocument: candidate.currentDocument ?? null,
+    currentDocument: normalizeTranslatedPaperDocument(candidate.currentDocument),
     paperTitleEn: typeof candidate.paperTitleEn === 'string' ? candidate.paperTitleEn : '',
     paperAuthors: typeof candidate.paperAuthors === 'string' ? candidate.paperAuthors : '',
     paperArxivId: typeof candidate.paperArxivId === 'string' ? candidate.paperArxivId : '',
@@ -105,6 +238,8 @@ export function normalizePersistedWorkspaceState(
     activeTab: safeActiveTab,
     derivationMindMapsByPaperId: safeMindMaps,
     settings: normalizeWorkspaceSettings(candidate.settings),
+    inProgressTranslation: normalizeInProgressTranslation(candidate.inProgressTranslation),
+    savedPapersArchive: safeArchive,
   };
 }
 
@@ -150,8 +285,12 @@ export function createWelcomeChatTurn(
   paperDoc: Pick<TranslatedPaperDocument, 'titleZh' | 'sections'>,
   firstParagraphId?: string
 ): PaperChatTurn {
+  const safeSections = Array.isArray(paperDoc.sections) ? paperDoc.sections : [];
+  const safeFirstParas = Array.isArray(safeSections[0]?.paragraphs)
+    ? safeSections[0].paragraphs
+    : [];
   const fallbackParagraphId =
-    firstParagraphId || paperDoc.sections[0]?.paragraphs[0]?.id || 'p-1-1';
+    firstParagraphId || safeFirstParas[0]?.id || 'p-1-1';
 
   return {
     id: 'welcome-turn',

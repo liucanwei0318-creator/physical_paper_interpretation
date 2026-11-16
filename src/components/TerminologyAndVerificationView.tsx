@@ -57,6 +57,30 @@ function getCloudTermColorClass(level: KnowledgeLevel, isSelected: boolean): str
   }
 }
 
+function getCloudTermTypographyClass(fontSizePx: number, fontWeight: number): string {
+  const sizeClass =
+    fontSizePx >= 24
+      ? 'text-2xl'
+      : fontSizePx >= 20
+      ? 'text-xl'
+      : fontSizePx >= 17
+      ? 'text-lg'
+      : fontSizePx >= 15
+      ? 'text-base'
+      : fontSizePx >= 13
+      ? 'text-sm'
+      : 'text-xs';
+  const weightClass =
+    fontWeight >= 700
+      ? 'font-bold'
+      : fontWeight >= 600
+      ? 'font-semibold'
+      : fontWeight >= 500
+      ? 'font-medium'
+      : 'font-normal';
+  return `${sizeClass} ${weightClass} leading-snug`;
+}
+
 export const TerminologyAndVerificationView: React.FC<TerminologyAndVerificationViewProps> = ({
   document,
   feedbackHistory,
@@ -120,7 +144,9 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
             titleEn: document.titleEn,
             authors: document.authors,
             abstractZh: document.abstractZh,
-            allSectionTitles: document.sections.map((s) => `${s.sectionNumber} ${s.titleZh}`),
+            allSectionTitles: (document.sections || []).map(
+              (s) => `${s.sectionNumber} ${s.titleZh}`
+            ),
           },
           knowledgeNodes,
         }),
@@ -269,7 +295,7 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
             <div>
               <div className="text-xs font-mono-tabular text-slate-500">已核验权威文献</div>
               <div className="text-2xl font-bold font-mono-tabular text-emerald-700 mt-0.5">
-                {document.citations.length}
+                {(document.citations || []).length}
               </div>
             </div>
             <div>
@@ -351,12 +377,10 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
                       onClick={() => handleSelectCloudTerm(item)}
                       aria-pressed={isSelected}
                       aria-label={`检索术语「${item.termZh} (${item.termEn})」的 arXiv 相关论文，全文出现 ${item.frequency} 次`}
-                      style={{
-                        fontSize: `${item.fontSizePx}px`,
-                        fontWeight: item.fontWeight,
-                        lineHeight: 1.35,
-                      }}
-                      className={`inline-flex items-baseline gap-1 px-2 py-0.5 rounded transition-colors cursor-pointer ${getCloudTermColorClass(
+                      className={`inline-flex items-baseline gap-1 px-2 py-0.5 rounded transition-colors cursor-pointer ${getCloudTermTypographyClass(
+                        item.fontSizePx,
+                        item.fontWeight
+                      )} ${getCloudTermColorClass(
                         item.knowledgeLevel,
                         isSelected
                       )}`}
@@ -665,11 +689,11 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
           </div>
 
           <div className="divide-y divide-slate-200 border border-slate-200 rounded-md">
-            {document.terminologyTable.map((term, idx) => {
+            {(document.terminologyTable || []).map((term, idx) => {
               const matchedCloud = allCloudItems.find(
                 (c) =>
                   c.termZh === term.termZh ||
-                  c.termEn.toLowerCase() === term.termEn.toLowerCase()
+                  c.termEn.toLowerCase() === (term.termEn || '').toLowerCase()
               );
 
               return (
@@ -778,7 +802,7 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
             )}
 
             <div className="divide-y divide-slate-200 border border-slate-200 rounded-md">
-              {document.citations.map((cit, idx) => (
+              {(document.citations || []).map((cit, idx) => (
                 <div key={idx} className="p-3.5 space-y-1 text-xs">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-mono-tabular font-semibold text-slate-900">

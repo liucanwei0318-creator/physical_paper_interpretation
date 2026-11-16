@@ -1,11 +1,17 @@
 import type {
+  AnnotationType,
   ChunkTranslationOutcome,
+  DerivationSourceType,
+  FormulaDeepAnalysis,
   GenerationMeta,
+  KnowledgeLevel,
   PaperSectionChunk,
+  PrecisionAnnotation,
   TerminologyEntry,
   TranslatedPaperDocument,
   TranslatedParagraph,
   TranslatedSection,
+  VerificationStatus,
   WebGroundingSource,
 } from '../types/physics.ts';
 import { isNonPhysicsAdministrativeTerm } from './terminologyCloud.ts';
@@ -442,16 +448,16 @@ export function mergeTranslatedSectionChunks(params: {
     }
 
     if (outcome.section) {
-      sections.push({
-        ...outcome.section,
-        chunkIndex: outcome.chunkIndex,
-        generationMeta: outcome.generationMeta ?? outcome.section.generationMeta,
-        paragraphs: (outcome.section.paragraphs || []).map((p, idx) => ({
-          ...p,
-          id: p.id || `p-c${outcome.chunkIndex + 1}-${idx + 1}`,
-          paragraphIndex: p.paragraphIndex || idx + 1,
-        })),
-      });
+      sections.push(
+        normalizeTranslatedSection(
+          {
+            ...outcome.section,
+            chunkIndex: outcome.chunkIndex,
+            generationMeta: outcome.generationMeta ?? outcome.section.generationMeta,
+          },
+          outcome.chunkIndex
+        )
+      );
     }
 
     for (const term of outcome.terminologyItems || []) {
@@ -496,7 +502,7 @@ export function mergeTranslatedSectionChunks(params: {
         timestamp: new Date().toISOString(),
       };
 
-  return {
+  return normalizeTranslatedPaperDocument({
     paperId: params.baseMeta.paperId || `doc-${Date.now()}`,
     titleZh: resolvedTitleZh || `${params.baseMeta.titleEn}（中文深度批注文稿）`,
     titleEn: params.baseMeta.titleEn,
@@ -506,7 +512,7 @@ export function mergeTranslatedSectionChunks(params: {
     abstractZh: resolvedAbstractZh,
     sections,
     terminologyTable: Array.from(termMap.values()),
-    citations: params.baseMeta.groundingSources.map((s, i) => ({
+    citations: (params.baseMeta.groundingSources || []).map((s, i) => ({
       citeKey: `[${i + 1}]`,
       authorsAndYear: s.sourceType,
       title: s.title,
@@ -515,7 +521,7 @@ export function mergeTranslatedSectionChunks(params: {
       verificationNote: s.snippet || '通过互联网学术数据库实时检索核验',
       url: s.uri,
     })),
-    groundingSources: params.baseMeta.groundingSources,
+    groundingSources: params.baseMeta.groundingSources || [],
     generationMeta: overallMeta,
     chunkStatusSummary: {
       totalChunks,
@@ -523,5 +529,402 @@ export function mergeTranslatedSectionChunks(params: {
       degradedChunks,
       failedChunks,
     },
+  })!;
+}
+
+/**
+ * Normalizes FormulaDeepAnalysis objects from LLM responses or legacy storage,
+ * ensuring symbols, theoremsUsed, and derivationSteps are always valid arrays.
+ */
+export function normalizeFormulaDeepAnalysis(
+  rawFa: unknown,
+  fallbackEqNum: string = '1'
+): FormulaDeepAnalysis | undefined {
+  if (!rawFa || typeof rawFa !== 'object') return undefined;
+  const fa = rawFa as Record<string, unknown>;
+
+  const symbols = Array.isArray(fa.symbols)
+    ? fa.symbols
+        .filter((s): s is Record<string, unknown> => Boolean(s) && typeof s === 'object')
+        .map((s) => ({
+          symbolLatex: typeof s.symbolLatex === 'string' ? s.symbolLatex : String(s.symbol || ''),
+          meaningZh: typeof s.meaningZh === 'string' ? s.meaningZh : String(s.meaning || ''),
+        }))
+    : [];
+
+  const theoremsUsed = Array.isArray(fa.theoremsUsed)
+    ? fa.theoremsUsed.map((t) => String(t ?? '').trim()).filter(Boolean)
+    : typeof fa.theoremsUsed === 'string' && fa.theoremsUsed.trim()
+    ? [fa.theoremsUsed.trim()]
+    : [];
+
+  const rawSteps = Array.isArray(fa.derivationSteps)
+    ? fa.derivationSteps
+    : Array.isArray(fa.keySteps)
+    ? fa.keySteps
+    : [];
+
+  const derivationSteps = rawSteps
+    .map((step, idx) => {
+      if (typeof step === 'string') {
+        return {
+          stepIndex: idx + 1,
+          sourceType: '补充推导' as DerivationSourceType,
+          descriptionZh: step,
+          latex: '',
+        };
+      }
+      if (step && typeof step === 'object') {
+        const st = step as Record<string, unknown>;
+        const rawSource = typeof st.sourceType === 'string' ? st.sourceType : '补充推导';
+        const validSource: DerivationSourceType =
+          rawSource === '原文推导' || rawSource === '补充推导' || rawSource === '独立核验'
+            ? rawSource
+            : '补充推导';
+        return {
+          stepIndex: typeof st.stepIndex === 'number' ? st.stepIndex : idx + 1,
+          sourceType: validSource,
+          descriptionZh:
+            typeof st.descriptionZh === 'string'
+              ? st.descriptionZh
+              : typeof st.description === 'string'
+              ? st.description
+              : `推导步骤 ${idx + 1}`,
+          latex: typeof st.latex === 'string' ? st.latex : '',
+        };
+      }
+      return null;
+    })
+    .filter((s): s is NonNullable<typeof s> => s !== null);
+
+  return {
+    equationNumber:
+      typeof fa.equationNumber === 'string' && fa.equationNumber.trim()
+        ? fa.equationNumber
+        : fallbackEqNum,
+    latex: typeof fa.latex === 'string' ? fa.latex : '',
+    symbols,
+    originAndContext:
+      typeof fa.originAndContext === 'string' ? fa.originAndContext : '本段核心公式推导',
+    mathematicalBasis:
+      typeof fa.mathematicalBasis === 'string' ? fa.mathematicalBasis : '标准理论物理推导',
+    theoremsUsed,
+    validityConditions:
+      typeof fa.validityConditions === 'string' ? fa.validityConditions : '遵循正文物理假设条件',
+    roleInPaper: typeof fa.roleInPaper === 'string' ? fa.roleInPaper : '支撑本节核心物理结论',
+    derivationSteps,
   };
 }
+
+const VALID_ANNOTATION_TYPES: ReadonlySet<AnnotationType> = new Set([
+  '理论解释',
+  '数学推导',
+  '物理机制',
+  '前置知识',
+  '关键辨析',
+]);
+
+const VALID_KNOWLEDGE_LEVELS: ReadonlySet<KnowledgeLevel> = new Set(['K1', 'K2', 'K3', 'K4']);
+
+export function normalizePrecisionAnnotation(
+  rawAnn: unknown,
+  fallbackId: string
+): PrecisionAnnotation {
+  const ann = (rawAnn && typeof rawAnn === 'object' ? rawAnn : {}) as Record<string, unknown>;
+  const rawType = typeof ann.type === 'string' ? ann.type : '理论解释';
+  const type: AnnotationType = VALID_ANNOTATION_TYPES.has(rawType as AnnotationType)
+    ? (rawType as AnnotationType)
+    : '理论解释';
+
+  const rawLevel =
+    typeof ann.knowledgeLevelTag === 'string'
+      ? ann.knowledgeLevelTag
+      : typeof ann.knowledgeLevel === 'string'
+      ? ann.knowledgeLevel
+      : 'K3';
+  const knowledgeLevelTag: KnowledgeLevel = VALID_KNOWLEDGE_LEVELS.has(rawLevel as KnowledgeLevel)
+    ? (rawLevel as KnowledgeLevel)
+    : 'K3';
+
+  const rawAuth = typeof ann.derivationAuthenticity === 'string' ? ann.derivationAuthenticity : undefined;
+  const derivationAuthenticity: DerivationSourceType | undefined =
+    rawAuth === '原文推导' || rawAuth === '补充推导' || rawAuth === '独立核验'
+      ? rawAuth
+      : undefined;
+
+  const rawVer = typeof ann.verificationStatus === 'string' ? ann.verificationStatus : '已核验';
+  const verificationStatus: VerificationStatus =
+    rawVer === '已核验' || rawVer === '待核实' || rawVer === '存在学术争议' ? rawVer : '已核验';
+
+  return {
+    id: typeof ann.id === 'string' && ann.id.trim() ? ann.id : fallbackId,
+    type,
+    targetConceptZh:
+      typeof ann.targetConceptZh === 'string' && ann.targetConceptZh.trim()
+        ? ann.targetConceptZh
+        : typeof ann.termZh === 'string' && ann.termZh.trim()
+        ? ann.termZh
+        : '核心物理概念',
+    targetConceptEn:
+      typeof ann.targetConceptEn === 'string'
+        ? ann.targetConceptEn
+        : typeof ann.termEn === 'string'
+        ? ann.termEn
+        : '',
+    targetEquationOrClause:
+      typeof ann.targetEquationOrClause === 'string' && ann.targetEquationOrClause.trim()
+        ? ann.targetEquationOrClause
+        : typeof ann.anchorTextZh === 'string'
+        ? ann.anchorTextZh
+        : '本段核心论述',
+    knowledgeLevelTag,
+    derivationAuthenticity,
+    verificationStatus,
+    whatItIs:
+      typeof ann.whatItIs === 'string' && ann.whatItIs.trim()
+        ? ann.whatItIs
+        : typeof ann.summaryZh === 'string'
+        ? ann.summaryZh
+        : '见本段理论阐述。',
+    whyHereAndRole:
+      typeof ann.whyHereAndRole === 'string' && ann.whyHereAndRole.trim()
+        ? ann.whyHereAndRole
+        : '衔接前置理论并支撑本段核心推导。',
+    prerequisitesNeeded:
+      typeof ann.prerequisitesNeeded === 'string'
+        ? ann.prerequisitesNeeded
+        : typeof ann.prerequisiteSource === 'string'
+        ? ann.prerequisiteSource
+        : undefined,
+    mathOrPhysicalMechanism:
+      typeof ann.mathOrPhysicalMechanism === 'string' && ann.mathOrPhysicalMechanism.trim()
+        ? ann.mathOrPhysicalMechanism
+        : typeof ann.detailZh === 'string'
+        ? ann.detailZh
+        : '通过正文数学形式体系严密导出。',
+    commonMisconceptions:
+      typeof ann.commonMisconceptions === 'string' ? ann.commonMisconceptions : undefined,
+    impactOnSubsequentArgs:
+      typeof ann.impactOnSubsequentArgs === 'string' ? ann.impactOnSubsequentArgs : undefined,
+    formulaAnalysis: normalizeFormulaDeepAnalysis(ann.formulaAnalysis),
+    referenceNote: typeof ann.referenceNote === 'string' ? ann.referenceNote : undefined,
+    suppressedByK1: typeof ann.suppressedByK1 === 'boolean' ? ann.suppressedByK1 : undefined,
+  };
+}
+
+export function normalizeTranslatedParagraph(
+  rawPara: unknown,
+  chunkIndex: number,
+  paraIdx: number
+): TranslatedParagraph {
+  const p = (rawPara && typeof rawPara === 'object' ? rawPara : {}) as Record<string, unknown>;
+  const id =
+    typeof p.id === 'string' && p.id.trim() ? p.id : `p-c${chunkIndex + 1}-${paraIdx + 1}`;
+  const paragraphIndex =
+    typeof p.paragraphIndex === 'number' && Number.isFinite(p.paragraphIndex)
+      ? p.paragraphIndex
+      : paraIdx + 1;
+
+  const rawEquations = Array.isArray(p.equations) ? p.equations : [];
+  const equations = rawEquations
+    .filter((eq): eq is Record<string, unknown> => Boolean(eq) && typeof eq === 'object')
+    .map((eq, eqIdx) => ({
+      number:
+        typeof eq.number === 'string' && eq.number.trim()
+          ? eq.number
+          : `${chunkIndex + 1}.${eqIdx + 1}`,
+      latex: typeof eq.latex === 'string' ? eq.latex : '',
+    }))
+    .filter((eq) => eq.latex.trim().length > 0);
+
+  const rawAnnotations = Array.isArray(p.annotations) ? p.annotations : [];
+  const annotations = rawAnnotations
+    .filter((a) => Boolean(a) && typeof a === 'object')
+    .map((a, aIdx) => normalizePrecisionAnnotation(a, `ann-${id}-${aIdx + 1}`));
+
+  const rawStmt = typeof p.statementType === 'string' ? p.statementType : '正文论述';
+  const validStmtTypes = new Set([
+    '正文论述',
+    '基本假设',
+    '严格定义',
+    '核心定理/引理',
+    '关键推论',
+    '物理结论',
+    '歧义辨析',
+  ]);
+  const statementType = validStmtTypes.has(rawStmt)
+    ? (rawStmt as TranslatedParagraph['statementType'])
+    : '正文论述';
+
+  return {
+    id,
+    paragraphIndex,
+    statementType,
+    originalEnExcerpt:
+      typeof p.originalEnExcerpt === 'string'
+        ? p.originalEnExcerpt
+        : typeof p.sourceEn === 'string'
+        ? p.sourceEn
+        : '',
+    translatedZhText:
+      typeof p.translatedZhText === 'string'
+        ? p.translatedZhText
+        : typeof p.translationZh === 'string'
+        ? p.translationZh
+        : '',
+    equations,
+    ambiguityNote: typeof p.ambiguityNote === 'string' ? p.ambiguityNote : undefined,
+    authorIssueNote: typeof p.authorIssueNote === 'string' ? p.authorIssueNote : undefined,
+    annotations,
+  };
+}
+
+export function normalizeTranslatedSection(
+  rawSec: unknown,
+  fallbackChunkIndex: number = 0
+): TranslatedSection {
+  const sec = (rawSec && typeof rawSec === 'object' ? rawSec : {}) as Record<string, unknown>;
+  const chunkIndex =
+    typeof sec.chunkIndex === 'number' && Number.isFinite(sec.chunkIndex)
+      ? sec.chunkIndex
+      : fallbackChunkIndex;
+  const sectionNumber =
+    typeof sec.sectionNumber === 'string' && sec.sectionNumber.trim()
+      ? sec.sectionNumber
+      : typeof sec.number === 'string' && sec.number.trim()
+      ? sec.number
+      : String(chunkIndex + 1);
+  const titleZh =
+    typeof sec.titleZh === 'string' && sec.titleZh.trim()
+      ? sec.titleZh
+      : typeof sec.headingZh === 'string' && sec.headingZh.trim()
+      ? sec.headingZh
+      : `第 ${sectionNumber} 节`;
+  const titleEn =
+    typeof sec.titleEn === 'string' && sec.titleEn.trim()
+      ? sec.titleEn
+      : typeof sec.headingEn === 'string' && sec.headingEn.trim()
+      ? sec.headingEn
+      : `Section ${sectionNumber}`;
+
+  const rawParagraphs = Array.isArray(sec.paragraphs) ? sec.paragraphs : [];
+  const paragraphs = rawParagraphs.map((p, idx) =>
+    normalizeTranslatedParagraph(p, chunkIndex, idx)
+  );
+
+  return {
+    sectionNumber,
+    titleZh,
+    titleEn,
+    paragraphs,
+    chunkIndex,
+    generationMeta:
+      sec.generationMeta && typeof sec.generationMeta === 'object'
+        ? (sec.generationMeta as GenerationMeta)
+        : undefined,
+  };
+}
+
+export function normalizeTranslatedPaperDocument(
+  rawDoc: unknown
+): TranslatedPaperDocument | null {
+  if (!rawDoc || typeof rawDoc !== 'object') return null;
+  const doc = rawDoc as Record<string, unknown>;
+
+  const rawSections = Array.isArray(doc.sections) ? doc.sections : [];
+  const sections = rawSections.map((s, idx) => normalizeTranslatedSection(s, idx));
+
+  const rawTerms = Array.isArray(doc.terminologyTable) ? doc.terminologyTable : [];
+  const terminologyTable: TerminologyEntry[] = rawTerms
+    .filter((t): t is Record<string, unknown> => Boolean(t) && typeof t === 'object')
+    .map((t) => ({
+      termZh: typeof t.termZh === 'string' ? t.termZh : '',
+      termEn: typeof t.termEn === 'string' ? t.termEn : '',
+      firstAppearanceSection:
+        typeof t.firstAppearanceSection === 'string' ? t.firstAppearanceSection : '第 1 节',
+      category: typeof t.category === 'string' ? t.category : '理论物理',
+      knowledgeLevel: VALID_KNOWLEDGE_LEVELS.has(t.knowledgeLevel as KnowledgeLevel)
+        ? (t.knowledgeLevel as KnowledgeLevel)
+        : 'K2',
+      definitionSummary: typeof t.definitionSummary === 'string' ? t.definitionSummary : '',
+    }))
+    .filter((t) => t.termZh || t.termEn);
+
+  const rawCitations = Array.isArray(doc.citations)
+    ? doc.citations
+    : Array.isArray(doc.references)
+    ? doc.references
+    : [];
+  const citations = rawCitations
+    .filter((c): c is Record<string, unknown> => Boolean(c) && typeof c === 'object')
+    .map((c, idx) => ({
+      citeKey: typeof c.citeKey === 'string' ? c.citeKey : `[${idx + 1}]`,
+      authorsAndYear: typeof c.authorsAndYear === 'string' ? c.authorsAndYear : '',
+      title: typeof c.title === 'string' ? c.title : '',
+      doiOrArxiv: typeof c.doiOrArxiv === 'string' ? c.doiOrArxiv : '',
+      status: (c.status === '已核验' || c.status === '待核实' || c.status === '存在学术争议'
+        ? c.status
+        : '已核验') as VerificationStatus,
+      verificationNote:
+        typeof c.verificationNote === 'string' ? c.verificationNote : '通过学术文献库核验',
+      url: typeof c.url === 'string' ? c.url : undefined,
+    }));
+
+  const rawSources = Array.isArray(doc.groundingSources) ? doc.groundingSources : [];
+  const groundingSources: WebGroundingSource[] = rawSources
+    .filter((s): s is Record<string, unknown> => Boolean(s) && typeof s === 'object')
+    .map((s) => ({
+      title: typeof s.title === 'string' ? s.title : '',
+      uri: typeof s.uri === 'string' ? s.uri : '',
+      sourceType:
+        s.sourceType === 'arXiv' ||
+        s.sourceType === 'CrossRef' ||
+        s.sourceType === 'GoogleSearch' ||
+        s.sourceType === 'OpenLibrary'
+          ? s.sourceType
+          : 'arXiv',
+      snippet: typeof s.snippet === 'string' ? s.snippet : undefined,
+    }));
+
+  return {
+    paperId:
+      typeof doc.paperId === 'string' && doc.paperId.trim()
+        ? doc.paperId
+        : typeof doc.id === 'string' && doc.id.trim()
+        ? doc.id
+        : `doc-${Date.now()}`,
+    titleZh:
+      typeof doc.titleZh === 'string' && doc.titleZh.trim()
+        ? doc.titleZh
+        : '理论物理论文中文深度批注文稿',
+    titleEn:
+      typeof doc.titleEn === 'string' && doc.titleEn.trim()
+        ? doc.titleEn
+        : 'Theoretical Physics Manuscript',
+    authors: typeof doc.authors === 'string' ? doc.authors : '',
+    institutionOrJournal:
+      typeof doc.institutionOrJournal === 'string'
+        ? doc.institutionOrJournal
+        : 'arXiv / Peer-Reviewed Preprint',
+    arxivIdOrDoi:
+      typeof doc.arxivIdOrDoi === 'string'
+        ? doc.arxivIdOrDoi
+        : typeof doc.arxivId === 'string'
+        ? doc.arxivId
+        : '',
+    abstractZh: typeof doc.abstractZh === 'string' ? doc.abstractZh : '',
+    sections,
+    terminologyTable,
+    citations,
+    groundingSources,
+    generationMeta:
+      doc.generationMeta && typeof doc.generationMeta === 'object'
+        ? (doc.generationMeta as GenerationMeta)
+        : undefined,
+    chunkStatusSummary:
+      doc.chunkStatusSummary && typeof doc.chunkStatusSummary === 'object'
+        ? (doc.chunkStatusSummary as TranslatedPaperDocument['chunkStatusSummary'])
+        : undefined,
+  };
+}
+

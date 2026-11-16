@@ -239,12 +239,17 @@ export function exportAcademicMarkdown(
   lines.push('');
 
   if (report) {
+    const policy = report.annotationPolicySummary || {
+      skipK1List: [],
+      conditionalK2List: [],
+      mandatoryK3K4Focus: [],
+    };
     lines.push('## 一、个人知识背景分析报告摘要');
-    lines.push(report.overallSummary);
+    lines.push(report.overallSummary || '');
     lines.push('');
-    lines.push(`- **免批注基础知识 (K1)**：${report.annotationPolicySummary.skipK1List.join('、')}`);
-    lines.push(`- **条件触发相关知识 (K2)**：${report.annotationPolicySummary.conditionalK2List.join('、')}`);
-    lines.push(`- **重点深入批注缺口 (K3 & K4)**：${report.annotationPolicySummary.mandatoryK3K4Focus.join('、')}`);
+    lines.push(`- **免批注基础知识 (K1)**：${(policy.skipK1List || []).join('、')}`);
+    lines.push(`- **条件触发相关知识 (K2)**：${(policy.conditionalK2List || []).join('、')}`);
+    lines.push(`- **重点深入批注缺口 (K3 & K4)**：${(policy.mandatoryK3K4Focus || []).join('、')}`);
     lines.push('');
     lines.push('---');
     lines.push('');
@@ -253,15 +258,15 @@ export function exportAcademicMarkdown(
   if (!doc) {
     if (preAnalysis) {
       lines.push('## 二、论文逐章知识缺口预分析报告');
-      lines.push(`- **研究方向**：${preAnalysis.researchDirection}`);
-      lines.push(`- **核心创新点与物理机制**：${preAnalysis.coreInnovationSummary}`);
+      lines.push(`- **研究方向**：${preAnalysis.researchDirection || ''}`);
+      lines.push(`- **核心创新点与物理机制**：${preAnalysis.coreInnovationSummary || ''}`);
       lines.push('');
-      for (const sec of preAnalysis.sectionGaps) {
+      for (const sec of preAnalysis.sectionGaps || []) {
         lines.push(`### ${sec.sectionNumber} ${sec.sectionTitleZh} (${sec.sectionTitleEn})`);
-        lines.push(`- **K1 免批注基础**：${sec.k1ConceptsToSkip.join('；')}`);
-        lines.push(`- **K3 陌生知识缺口**：${sec.k3UnknownGaps.join('；')}`);
-        lines.push(`- **K4 论文专属机制**：${sec.k4PaperSpecificInnovations.join('；')}`);
-        lines.push(`- **本节批注策略**：${sec.gapAnalysisSummary}`);
+        lines.push(`- **K1 免批注基础**：${(sec.k1ConceptsToSkip || []).join('；')}`);
+        lines.push(`- **K3 陌生知识缺口**：${(sec.k3UnknownGaps || []).join('；')}`);
+        lines.push(`- **K4 论文专属机制**：${(sec.k4PaperSpecificInnovations || []).join('；')}`);
+        lines.push(`- **本节批注策略**：${sec.gapAnalysisSummary || ''}`);
         lines.push('');
       }
     }
@@ -271,23 +276,25 @@ export function exportAcademicMarkdown(
   lines.push('## 二、中文学术全文翻译与精准批注');
   lines.push('');
   lines.push('### 摘要');
-  lines.push(doc.abstractZh);
+  lines.push(doc.abstractZh || '');
   lines.push('');
 
-  for (const section of doc.sections) {
+  for (const section of doc.sections || []) {
     lines.push(`### ${section.sectionNumber} ${section.titleZh}`);
     lines.push('');
-    for (const para of section.paragraphs) {
-      if (para.statementType !== '正文论述') {
-        lines.push(`**[${para.statementType}]** ${para.translatedZhText}`);
+    for (const para of section.paragraphs || []) {
+      if (para.statementType && para.statementType !== '正文论述') {
+        lines.push(`**[${para.statementType}]** ${para.translatedZhText || ''}`);
       } else {
-        lines.push(para.translatedZhText);
+        lines.push(para.translatedZhText || '');
       }
       lines.push('');
 
-      if (para.equations && para.equations.length > 0) {
-        for (const eq of para.equations) {
-          lines.push(`$$${eq.latex} \\tag{${eq.number}}$$`);
+      const safeEquations = Array.isArray(para.equations) ? para.equations : [];
+      if (safeEquations.length > 0) {
+        for (const eq of safeEquations) {
+          if (!eq || !eq.latex) continue;
+          lines.push(`$$${eq.latex} \\tag{${eq.number || ''}}$$`);
           lines.push('');
         }
       }
@@ -301,31 +308,36 @@ export function exportAcademicMarkdown(
         lines.push('');
       }
 
-      for (const ann of para.annotations) {
+      const safeAnnotations = Array.isArray(para.annotations) ? para.annotations : [];
+      for (const ann of safeAnnotations) {
+        if (!ann || typeof ann !== 'object') continue;
         const visibility = shouldDisplayAnnotation(ann, nodes, includeSuppressedK1);
         if (!visibility.visible) continue;
 
-        lines.push(`> **【${ann.type}｜${ann.targetConceptZh}（${ann.targetConceptEn}）】** *(知识层级：${visibility.currentLevel}｜核验状态：${ann.verificationStatus})*`);
-        lines.push(`> - **核心定义与实质**：${ann.whatItIs}`);
-        lines.push(`> - **在本文中的作用**：${ann.whyHereAndRole}`);
+        lines.push(`> **【${ann.type || '理论解释'}｜${ann.targetConceptZh || ''}（${ann.targetConceptEn || ''}）】** *(知识层级：${visibility.currentLevel}｜核验状态：${ann.verificationStatus || '已核验'})*`);
+        lines.push(`> - **核心定义与实质**：${ann.whatItIs || ''}`);
+        lines.push(`> - **在本文中的作用**：${ann.whyHereAndRole || ''}`);
         if (ann.prerequisitesNeeded) {
           lines.push(`> - **必需前置知识**：${ann.prerequisitesNeeded}`);
         }
-        lines.push(`> - **数学与物理机制**：${ann.mathOrPhysicalMechanism}`);
+        lines.push(`> - **数学与物理机制**：${ann.mathOrPhysicalMechanism || ''}`);
         if (ann.commonMisconceptions) {
           lines.push(`> - **关键辨析与易错点**：${ann.commonMisconceptions}`);
         }
         if (ann.impactOnSubsequentArgs) {
           lines.push(`> - **对后续论证的影响**：${ann.impactOnSubsequentArgs}`);
         }
-        if (ann.formulaAnalysis) {
+        if (ann.formulaAnalysis && typeof ann.formulaAnalysis === 'object') {
           const fa = ann.formulaAnalysis;
-          lines.push(`> - **公式 (${fa.equationNumber}) 深度拆解**：`);
-          lines.push(`>   - 成立条件：${fa.validityConditions}`);
-          lines.push(`>   - 数学定理依据：${fa.theoremsUsed.join('；')}`);
-          for (const step of fa.derivationSteps) {
-            lines.push(`>   - **【${step.sourceType}】步骤 ${step.stepIndex}**：${step.descriptionZh}`);
-            lines.push(`>     $$${step.latex}$$`);
+          const safeTheorems = Array.isArray(fa.theoremsUsed) ? fa.theoremsUsed : [];
+          const safeSteps = Array.isArray(fa.derivationSteps) ? fa.derivationSteps : [];
+          lines.push(`> - **公式 (${fa.equationNumber || ''}) 深度拆解**：`);
+          lines.push(`>   - 成立条件：${fa.validityConditions || ''}`);
+          lines.push(`>   - 数学定理依据：${safeTheorems.join('；')}`);
+          for (const step of safeSteps) {
+            if (!step) continue;
+            lines.push(`>   - **【${step.sourceType || '原文推导'}】步骤 ${step.stepIndex || 1}**：${step.descriptionZh || ''}`);
+            lines.push(`>     $$${step.latex || ''}$$`);
           }
         }
         lines.push('');
@@ -337,7 +349,8 @@ export function exportAcademicMarkdown(
   lines.push('');
   lines.push('## 三、全文专业术语统一对照表');
   lines.push('');
-  for (const term of doc.terminologyTable) {
+  for (const term of doc.terminologyTable || []) {
+    if (!term) continue;
     lines.push(`- **${term.termZh}**（${term.termEn}）[首次出现：${term.firstAppearanceSection} | ${term.knowledgeLevel}]：${term.definitionSummary}`);
   }
 

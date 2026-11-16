@@ -37,6 +37,7 @@ import {
 import {
   splitPaperIntoSectionChunks,
   buildFallbackSectionFromChunk,
+  normalizeTranslatedSection,
 } from './src/utils/paperChunker.ts';
 import { isNonPhysicsAdministrativeTerm } from './src/utils/terminologyCloud.ts';
 import type {
@@ -811,16 +812,25 @@ ${sourcesContext || '未直接命中外部条目，请基于理论物理权威�
     }
   });
 
-  // 2. Fetch Full arXiv Paper (Metadata + ar5iv HTML / LaTeX Sections)
-  app.post('/api/fetch-arxiv', async (req, res) => {
+  // 2. Fetch Full arXiv Paper (Metadata + ar5iv HTML / LaTeX Sections) - supports both POST and GET
+  const handleFetchArxivRequest = async (req: express.Request, res: express.Response) => {
     try {
-      const { arxivInput } = req.body as { arxivInput?: string };
-      if (!arxivInput || !arxivInput.trim()) {
+      const bodyObj = (req.body || {}) as { arxivInput?: string; id?: string; query?: string };
+      const queryObj = (req.query || {}) as { arxivInput?: string; id?: string; query?: string };
+      const arxivInput =
+        bodyObj.arxivInput ||
+        bodyObj.id ||
+        bodyObj.query ||
+        queryObj.arxivInput ||
+        queryObj.id ||
+        queryObj.query ||
+        '';
+      if (!arxivInput || !String(arxivInput).trim()) {
         res.status(400).json({ error: '请输入有效的 arXiv 编号（如 hep-th/0603001 或 2301.00001）或英文论文标题。' });
         return;
       }
 
-      const paperData = await fetchArxivFullTextById(arxivInput.trim());
+      const paperData = await fetchArxivFullTextById(String(arxivInput).trim());
       if (!paperData) {
         res.status(404).json({
           error: `未在 arXiv 官方库中找到「${arxivInput}」，请检查编号格式或直接粘贴英文论文正文。`,
@@ -833,7 +843,9 @@ ${sourcesContext || '未直接命中外部条目，请基于理论物理权威�
       const msg = error instanceof Error ? error.message : 'arXiv 论文拉取失败';
       res.status(500).json({ error: msg });
     }
-  });
+  };
+  app.post('/api/fetch-arxiv', handleFetchArxivRequest);
+  app.get('/api/fetch-arxiv', handleFetchArxivRequest);
 
   // 2.5 Fetch Real Book Table of Contents on Demand for Stage 1 Preview
   app.post('/api/fetch-book-toc', async (req, res) => {
@@ -1649,7 +1661,7 @@ ${numberedSourceText}
           Array.isArray(parsedRes.data.section.paragraphs) &&
           parsedRes.data.section.paragraphs.length > 0
         ) {
-          const sec = parsedRes.data.section;
+          const sec = normalizeTranslatedSection(parsedRes.data.section, chunk.chunkIndex);
           // Ensure no source $$...$$ display equations from the chunk were dropped by the model
           const sourceDisplayEqs = [...chunk.rawChunkText.matchAll(/\$\$([\s\S]+?)\$\$/g)]
             .map((m) => m[1].trim())
@@ -2439,12 +2451,13 @@ ${buildGeminiAnnotationDetailDirective(detailLevel, 'mindmap')}
 
   const distPath = path.join(__dirname, 'dist');
   const distIndexHtml = path.join(distPath, 'index.html');
-  const isProductionRuntime =
-    process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.K_SERVICE) ||
-    (process.env.npm_lifecycle_event === 'start' && fs.existsSync(distIndexHtml));
+  const isDevScript = process.env.npm_lifecycle_event === 'dev';
+  const useStaticDist =
+    !isDevScript &&
+    (process.env.NODE_ENV === 'production' || process.env.npm_lifecycle_event === 'start') &&
+    fs.existsSync(distIndexHtml);
 
-  if (!isProductionRuntime) {
+  if (!useStaticDist) {
     process.env.DISABLE_HMR = process.env.DISABLE_HMR || 'true';
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -2503,8 +2516,12 @@ export class ErrorOverlay extends HTMLElement {}
     app.use(vite.middlewares);
   } else {
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(distIndexHtml);
+    app.get('*', (_req, res, next) => {
+      if (fs.existsSync(distIndexHtml)) {
+        res.sendFile(distIndexHtml);
+      } else {
+        next();
+      }
     });
   }
 

@@ -338,6 +338,36 @@ export interface WorkspaceSettings {
   manuscriptWidthPercent?: number;
 }
 
+export interface InProgressTranslationSnapshot {
+  paperId: string;
+  titleEn: string;
+  titleZh: string;
+  authors: string;
+  arxivIdOrDoi: string;
+  rawTextHash: string;
+  annotationDetailLevel: AnnotationDetailLevel;
+  totalChunks?: number;
+  completedChunks?: number;
+  chunks: PaperSectionChunk[];
+  outcomes: ChunkTranslationOutcome[];
+  updatedAt: string;
+}
+
+export interface ArchivedPaperEntry {
+  paperId: string;
+  titleZh: string;
+  titleEn: string;
+  authors: string;
+  arxivIdOrDoi: string;
+  savedAt: string;
+  annotationDetailLevel: AnnotationDetailLevel;
+  completedChunks: number;
+  totalChunks: number;
+  preAnalysis: PaperPreAnalysis | null;
+  document: TranslatedPaperDocument;
+  paperRawText: string;
+}
+
 export interface PersistedWorkspaceState {
   materials: ReadingMaterial[];
   knowledgeNodes: KnowledgeNode[];
@@ -354,5 +384,7 @@ export interface PersistedWorkspaceState {
   activeParagraphByPaperId?: Record<string, string>;
   activeTab?: ActiveWorkspaceTab;
   derivationMindMapsByPaperId?: Record<string, Record<string, DerivationMindMapTree>>;
+  inProgressTranslation?: InProgressTranslationSnapshot | null;
+  savedPapersArchive?: ArchivedPaperEntry[];
   settings?: WorkspaceSettings;
 }
