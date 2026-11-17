@@ -27,13 +27,20 @@ import {
   getAnnotationDetailProfile,
   normalizeAnnotationDetailLevel,
 } from './src/utils/annotationSettings.ts';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   SUPPORTED_GEMINI_TEXT_MODELS,
   classifyGeminiError,
   cleanAndParseJson,
   buildDegradedMeta,
   buildSuccessMeta,
+  normalizePreferredGeminiModel,
+  normalizeModelRoutingMode,
 } from './src/utils/geminiDiagnostics.ts';
+import {
+  estimateTokensFromText,
+  inferStageLabelZhFromEndpoint,
+} from './src/utils/quotaTracker.ts';
 import {
   splitPaperIntoSectionChunks,
   buildFallbackSectionFromChunk,
@@ -45,6 +52,9 @@ import type {
   PaperSectionChunk,
   TranslatedSection,
   TerminologyEntry,
+  SelectableGeminiModel,
+  ModelRoutingMode,
+  GeminiUsageLogEntry,
 } from './src/types/physics.ts';
 
 dotenv.config();
@@ -72,14 +82,31 @@ interface CascadeGenerationResult {
   meta: GenerationMeta;
 }
 
+interface RequestModelContext {
+  preferredModel: SelectableGeminiModel;
+  routingMode: ModelRoutingMode;
+  endpoint: string;
+}
+
+const requestContextStorage = new AsyncLocalStorage<RequestModelContext>();
+const serverUsageLedger: GeminiUsageLogEntry[] = [];
+const MAX_SERVER_LEDGER_ENTRIES = 250;
+
+function recordServerUsageEntry(entry: GeminiUsageLogEntry): void {
+  serverUsageLedger.unshift(entry);
+  if (serverUsageLedger.length > MAX_SERVER_LEDGER_ENTRIES) {
+    serverUsageLedger.length = MAX_SERVER_LEDGER_ENTRIES;
+  }
+}
+
 // Tracks temporary cooldown timestamps (ms) for primary models that timed out or returned unavailable errors
 // so multi-chunk translations route directly to the responsive model without cold-wait stalls.
 const modelCooldownUntil = new Map<string, number>();
 const MODEL_COOLDOWN_MS = 600_000;
 
 /**
- * Runs supported @google/genai text models in cascade and returns structured diagnostic metadata
- * instead of silently swallowing errors into null.
+ * Runs supported @google/genai text models in cascade (respecting user's preferred model and routing mode)
+ * and returns structured diagnostic + token usage metadata.
  */
 async function generateWithCascadeDetailed(
   promptOrContents:
@@ -90,16 +117,53 @@ async function generateWithCascadeDetailed(
     pdfBase64?: string;
     systemInstruction?: string;
     timeoutMs?: number;
+    preferredModel?: SelectableGeminiModel;
+    routingMode?: ModelRoutingMode;
   } = {}
 ): Promise<CascadeGenerationResult> {
+  const reqCtx = requestContextStorage.getStore();
+  const requestedModel = normalizePreferredGeminiModel(
+    options.preferredModel ?? reqCtx?.preferredModel
+  );
+  const routingMode = normalizeModelRoutingMode(options.routingMode ?? reqCtx?.routingMode);
+  const endpoint = reqCtx?.endpoint || '/api/gemini';
+  const callStartMs = Date.now();
+
+  const promptRawText =
+    typeof promptOrContents === 'string'
+      ? promptOrContents
+      : JSON.stringify(promptOrContents || '');
+  const estimatedPromptTokens = estimateTokensFromText(promptRawText);
+
   const ai = getGenAIClient();
   if (!ai) {
+    const latencyMs = Math.max(1, Date.now() - callStartMs);
+    recordServerUsageEntry({
+      id: `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      endpoint,
+      stageLabelZh: inferStageLabelZhFromEndpoint(endpoint),
+      requestedModel,
+      actualModel: 'deterministic_fallback',
+      promptTokens: estimatedPromptTokens,
+      completionTokens: 0,
+      totalTokens: estimatedPromptTokens,
+      latencyMs,
+      degraded: true,
+    });
     return {
       text: null,
       meta: buildDegradedMeta(
         'MISSING_KEY',
         '服务端未配置有效的 GEMINI_API_KEY，当前已降级为本地结构化响应。',
-        false
+        false,
+        {
+          requestedModel,
+          promptTokens: estimatedPromptTokens,
+          completionTokens: 0,
+          totalTokens: estimatedPromptTokens,
+          latencyMs,
+        }
       ),
     };
   }
@@ -108,23 +172,47 @@ async function generateWithCascadeDetailed(
   const timeoutMs = options.timeoutMs ?? 45000;
   const now = Date.now();
 
-  // Order models so healthy (non-cooled-down) models are tried first
-  const orderedModels = [...SUPPORTED_GEMINI_TEXT_MODELS].sort((a, b) => {
-    const aCooling = (modelCooldownUntil.get(a) ?? 0) > now ? 1 : 0;
-    const bCooling = (modelCooldownUntil.get(b) ?? 0) > now ? 1 : 0;
-    return aCooling - bCooling;
-  });
+  // Build ordered candidate models: always prioritize user's requestedModel first
+  const candidatePool: SelectableGeminiModel[] =
+    routingMode === 'strict'
+      ? [requestedModel]
+      : [
+          requestedModel,
+          ...SUPPORTED_GEMINI_TEXT_MODELS.filter((m) => m !== requestedModel),
+        ];
+
+  const orderedModels =
+    routingMode === 'strict'
+      ? candidatePool
+      : [...candidatePool].sort((a, b) => {
+          const aCooling = (modelCooldownUntil.get(a) ?? 0) > now ? 1 : 0;
+          const bCooling = (modelCooldownUntil.get(b) ?? 0) > now ? 1 : 0;
+          if (aCooling !== bCooling) return aCooling - bCooling;
+          if (a === requestedModel) return -1;
+          if (b === requestedModel) return 1;
+          return 0;
+        });
 
   for (let idx = 0; idx < orderedModels.length; idx++) {
     const modelName = orderedModels[idx];
-    // Skip a cooled-down model if another model has already been tried or is available
-    if ((modelCooldownUntil.get(modelName) ?? 0) > Date.now() && orderedModels.length > 1) {
+    // Skip a cooled-down model only in cascade mode when another fallback model is available
+    if (
+      routingMode !== 'strict' &&
+      modelName !== requestedModel &&
+      (modelCooldownUntil.get(modelName) ?? 0) > Date.now() &&
+      orderedModels.length > 1
+    ) {
       continue;
     }
 
-    // Give experimental primary model a fast 6s probe cap so it never stalls 45s; give flash-lite the full timeoutMs
     const perModelTimeoutMs =
-      modelName === 'gemini-4-hydrogen' ? Math.min(6000, timeoutMs) : timeoutMs;
+      routingMode === 'strict'
+        ? timeoutMs
+        : modelName === 'gemini-4-argon'
+        ? Math.min(25000, timeoutMs)
+        : modelName === 'gemini-4-hydrogen'
+        ? Math.min(10000, timeoutMs)
+        : timeoutMs;
     const maxAttempts = modelName === 'gemini-3.1-flash-lite' ? 2 : 1;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -165,27 +253,92 @@ async function generateWithCascadeDetailed(
 
         if (response.text && response.text.trim()) {
           modelCooldownUntil.delete(modelName);
+          const cleanText = response.text.trim();
+          const latencyMs = Math.max(1, Date.now() - callStartMs);
+          const usageMeta = (response as unknown as {
+            usageMetadata?: {
+              promptTokenCount?: number;
+              candidatesTokenCount?: number;
+              totalTokenCount?: number;
+            };
+          }).usageMetadata;
+
+          const promptTokens =
+            typeof usageMeta?.promptTokenCount === 'number' && usageMeta.promptTokenCount > 0
+              ? usageMeta.promptTokenCount
+              : estimatedPromptTokens;
+          const completionTokens =
+            typeof usageMeta?.candidatesTokenCount === 'number' &&
+            usageMeta.candidatesTokenCount > 0
+              ? usageMeta.candidatesTokenCount
+              : estimateTokensFromText(cleanText);
+          const totalTokens =
+            typeof usageMeta?.totalTokenCount === 'number' && usageMeta.totalTokenCount > 0
+              ? usageMeta.totalTokenCount
+              : promptTokens + completionTokens;
+
+          recordServerUsageEntry({
+            id: `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            endpoint,
+            stageLabelZh: inferStageLabelZhFromEndpoint(endpoint),
+            requestedModel,
+            actualModel: modelName,
+            promptTokens,
+            completionTokens,
+            totalTokens,
+            latencyMs,
+            degraded: false,
+          });
+
           return {
-            text: response.text.trim(),
-            meta: buildSuccessMeta(modelName),
+            text: cleanText,
+            meta: buildSuccessMeta(modelName, {
+              requestedModel,
+              promptTokens,
+              completionTokens,
+              totalTokens,
+              latencyMs,
+            }),
           };
         }
-        if (modelName === 'gemini-4-hydrogen') {
+        if (modelName === 'gemini-4-hydrogen' || modelName === 'gemini-4-argon') {
           modelCooldownUntil.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
         }
       } catch (err) {
         lastClassified = classifyGeminiError(err);
         if (!lastClassified.retryable) {
+          const latencyMs = Math.max(1, Date.now() - callStartMs);
+          recordServerUsageEntry({
+            id: `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            endpoint,
+            stageLabelZh: inferStageLabelZhFromEndpoint(endpoint),
+            requestedModel,
+            actualModel: 'deterministic_fallback',
+            promptTokens: estimatedPromptTokens,
+            completionTokens: 0,
+            totalTokens: estimatedPromptTokens,
+            latencyMs,
+            degraded: true,
+          });
           return {
             text: null,
             meta: buildDegradedMeta(
               lastClassified.errorCode,
               lastClassified.reasonZh,
-              false
+              false,
+              {
+                requestedModel,
+                promptTokens: estimatedPromptTokens,
+                completionTokens: 0,
+                totalTokens: estimatedPromptTokens,
+                latencyMs,
+              }
             ),
           };
         }
-        if (modelName === 'gemini-4-hydrogen') {
+        if (modelName === 'gemini-4-hydrogen' || modelName === 'gemini-4-argon') {
           modelCooldownUntil.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
           break;
         }
@@ -197,12 +350,34 @@ async function generateWithCascadeDetailed(
     }
   }
 
+  const latencyMs = Math.max(1, Date.now() - callStartMs);
+  recordServerUsageEntry({
+    id: `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: new Date().toISOString(),
+    endpoint,
+    stageLabelZh: inferStageLabelZhFromEndpoint(endpoint),
+    requestedModel,
+    actualModel: 'deterministic_fallback',
+    promptTokens: estimatedPromptTokens,
+    completionTokens: 0,
+    totalTokens: estimatedPromptTokens,
+    latencyMs,
+    degraded: true,
+  });
+
   return {
     text: null,
     meta: buildDegradedMeta(
       lastClassified.errorCode,
       lastClassified.reasonZh,
-      lastClassified.retryable
+      lastClassified.retryable,
+      {
+        requestedModel,
+        promptTokens: estimatedPromptTokens,
+        completionTokens: 0,
+        totalTokens: estimatedPromptTokens,
+        latencyMs,
+      }
     ),
   };
 }
@@ -727,17 +902,52 @@ ${webContext.snippets.join('\n')}
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
 
   app.use(express.json({ limit: '35mb' }));
+
+  // Per-request Gemini model routing context middleware for /api/*
+  app.use('/api', (req, _res, next) => {
+    const preferredModel = normalizePreferredGeminiModel(
+      req.headers['x-preferred-gemini-model'] || req.body?.preferredModel
+    );
+    const routingMode = normalizeModelRoutingMode(
+      req.headers['x-model-routing-mode'] || req.body?.routingMode
+    );
+
+    requestContextStorage.run(
+      {
+        preferredModel,
+        routingMode,
+        endpoint: `/api${req.path}`,
+      },
+      () => {
+        next();
+      }
+    );
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({
       ok: true,
       hasGeminiKey: Boolean(getGenAIClient()),
+      supportedModels: SUPPORTED_GEMINI_TEXT_MODELS,
       nodeVersion: process.version,
       env: process.env.NODE_ENV || 'development',
     });
+  });
+
+  app.get('/api/usage-stats', (_req, res) => {
+    res.json({
+      ok: true,
+      supportedModels: SUPPORTED_GEMINI_TEXT_MODELS,
+      recentEntries: serverUsageLedger.slice(0, 100),
+    });
+  });
+
+  app.post('/api/usage-stats/reset', (_req, res) => {
+    serverUsageLedger.length = 0;
+    res.json({ ok: true });
   });
 
   // 1. Live Internet Retrieval & Academic Verification Endpoint
@@ -962,29 +1172,45 @@ ${sourcesContext || '未直接命中外部条目，请基于理论物理权威�
   // 4. Synthesize Full《个人知识背景分析报告》from User's Materials & Nodes (Stage 1 - 2.3)
   app.post('/api/generate-knowledge-report', async (req, res) => {
     try {
-      const { materials, knowledgeNodes } = req.body as {
-        materials: Array<{
-          title: string;
-          authors: string;
-          editionOrYear: string;
-          domain: string;
-          readScope: string;
+      const { materials: rawMaterials, knowledgeNodes: rawKnowledgeNodes } = (req.body || {}) as {
+        materials?: Array<{
+          title?: string;
+          authors?: string;
+          editionOrYear?: string;
+          domain?: string;
+          readScope?: string;
           parsedScopeSummary?: string;
-          explicitMastered: string[];
-          inferredMastered: string[];
-          unlearnedOrSkipped: string[];
-          mathTools: string[];
+          explicitMastered?: string[];
+          inferredMastered?: string[];
+          unlearnedOrSkipped?: string[];
+          mathTools?: string[];
         }>;
-        knowledgeNodes: Array<{
-          conceptNameZh: string;
-          conceptNameEn: string;
-          level: string;
-          epistemicStatus: string;
-          rationale: string;
+        knowledgeNodes?: Array<{
+          conceptNameZh?: string;
+          conceptNameEn?: string;
+          level?: string;
+          epistemicStatus?: string;
+          rationale?: string;
         }>;
       };
 
-      if (!materials || materials.length === 0) {
+      const materials = Array.isArray(rawMaterials)
+        ? rawMaterials.map((m) => ({
+            title: String(m?.title || '未命名教材'),
+            authors: String(m?.authors || ''),
+            editionOrYear: String(m?.editionOrYear || ''),
+            domain: String(m?.domain || '理论物理'),
+            readScope: String(m?.readScope || '全部章节'),
+            parsedScopeSummary: typeof m?.parsedScopeSummary === 'string' ? m.parsedScopeSummary : undefined,
+            explicitMastered: Array.isArray(m?.explicitMastered) ? m.explicitMastered.map(String) : [],
+            inferredMastered: Array.isArray(m?.inferredMastered) ? m.inferredMastered.map(String) : [],
+            unlearnedOrSkipped: Array.isArray(m?.unlearnedOrSkipped) ? m.unlearnedOrSkipped.map(String) : [],
+            mathTools: Array.isArray(m?.mathTools) ? m.mathTools.map(String) : [],
+          }))
+        : [];
+      const knowledgeNodes = Array.isArray(rawKnowledgeNodes) ? rawKnowledgeNodes : [];
+
+      if (materials.length === 0) {
         res.status(400).json({ error: '请先至少添加一部您阅读过的教材、专著或论文材料。' });
         return;
       }
@@ -1044,9 +1270,9 @@ ${JSON.stringify(knowledgeNodes.slice(0, 30), null, 2)}
               },
               epistemicBreakdown: {
                 providedMaterialsCount: materials.length,
-                explicitMasteredCount: knowledgeNodes.filter((n) => n.epistemicStatus === '已学习知识').length,
-                inferredCount: knowledgeNodes.filter((n) => n.epistemicStatus === '推测掌握知识').length,
-                unknownCount: knowledgeNodes.filter((n) => n.epistemicStatus === '未知知识').length,
+                explicitMasteredCount: knowledgeNodes.filter((n) => n?.epistemicStatus === '已学习知识').length,
+                inferredCount: knowledgeNodes.filter((n) => n?.epistemicStatus === '推测掌握知识').length,
+                unknownCount: knowledgeNodes.filter((n) => n?.epistemicStatus === '未知知识').length,
               },
               groundingSources: [],
               generationMeta: effectiveMeta,
@@ -1085,9 +1311,9 @@ ${JSON.stringify(knowledgeNodes.slice(0, 30), null, 2)}
           },
           epistemicBreakdown: {
             providedMaterialsCount: materials.length,
-            explicitMasteredCount: knowledgeNodes.filter((n) => n.epistemicStatus === '已学习知识').length,
-            inferredCount: knowledgeNodes.filter((n) => n.epistemicStatus === '推测掌握知识').length,
-            unknownCount: knowledgeNodes.filter((n) => n.epistemicStatus === '未知知识').length,
+            explicitMasteredCount: knowledgeNodes.filter((n) => n?.epistemicStatus === '已学习知识').length,
+            inferredCount: knowledgeNodes.filter((n) => n?.epistemicStatus === '推测掌握知识').length,
+            unknownCount: knowledgeNodes.filter((n) => n?.epistemicStatus === '未知知识').length,
           },
           groundingSources: [],
           generationMeta: effectiveMeta,

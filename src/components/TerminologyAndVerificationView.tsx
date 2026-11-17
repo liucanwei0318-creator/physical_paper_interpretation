@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import type { GenerationMeta } from '../types/physics';
 import { DiagnosticAlert } from './DiagnosticAlert';
+import { apiFetch } from '../utils/quotaTracker';
 
 interface TerminologyAndVerificationViewProps {
   document: TranslatedPaperDocument;
@@ -119,7 +120,7 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
 
     setIsAskingTermGuide(true);
     try {
-      const resp = await fetch('/api/paper-chat', {
+      const resp = await apiFetch('/api/paper-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -210,7 +211,7 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
 
     setIsSearchingArxivTerm(true);
     try {
-      const resp = await fetch('/api/arxiv-term-search', {
+      const resp = await apiFetch('/api/arxiv-term-search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -246,7 +247,7 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
     setDoiError(null);
     setIsVerifyingDoi(true);
     try {
-      const resp = await fetch('/api/web-search', {
+      const resp = await apiFetch('/api/web-search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: clean, searchMode: 'paper' }),
@@ -679,12 +680,12 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left 7 Cols: Unified Terminology Table */}
         <section className="lg:col-span-7 bg-white border border-slate-200 rounded-lg p-6 space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-base font-semibold text-slate-900">
               3.1 专业术语首次出现规范与全文统一对照表
             </h2>
-            <span className="text-xs font-mono-tabular text-slate-500">
-              格式：中文术语（English Term）
+            <span className="text-xs font-mono-tabular text-emerald-700 font-medium">
+              ✓ 已强制执行「中文术语（English Term）」首次出现规范
             </span>
           </div>
 
@@ -740,7 +741,7 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
                 第七阶段 · 权威文献、DOI 与公式真实性核验
               </h2>
               <p className="text-xs text-slate-500">
-                所有补充知识均依据经典文献与正式发表论文，支持输入任意 DOI / 标题实时联网查验。
+                所有引用文献均与 CrossRef / arXiv 数据库核对，您也可以输入任意 DOI 或标题进行实时联网查验。
               </p>
             </div>
 

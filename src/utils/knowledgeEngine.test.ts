@@ -9,7 +9,11 @@ import {
   parseReadScopeExpression,
   analyzeMaterialScopeDeterministically,
 } from './scopeParser.ts';
-import type { KnowledgeNode, PrecisionAnnotation, ReadingMaterial } from '../types/physics.ts';
+import type {
+  KnowledgeNode,
+  PrecisionAnnotation,
+  ReadingMaterial,
+} from '../types/physics.ts';
 
 const sampleNodes: KnowledgeNode[] = [
   {
@@ -224,5 +228,6 @@ test('analyzeMaterialScopeDeterministically uses authentic chapter counts for di
   assert.equal(unlistedWithCustomToc.chapterBreakdown[2]?.status, 'partial_k2');
   assert.equal(unlistedWithCustomToc.chapterBreakdown[3]?.status, 'unread_k3');
 });
+
 
 

@@ -31,6 +31,7 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import { DiagnosticAlert } from './DiagnosticAlert';
+import { apiFetch } from '../utils/quotaTracker';
 
 interface KnowledgeStageViewProps {
   materials: ReadingMaterial[];
@@ -180,7 +181,7 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
     setMaterialError('');
     setIsFetchingToc(true);
     try {
-      const resp = await fetch('/api/fetch-book-toc', {
+      const resp = await apiFetch('/api/fetch-book-toc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -247,7 +248,7 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
     setWebSearchError('');
     setIsSearchingWeb(true);
     try {
-      const resp = await fetch('/api/web-search', {
+      const resp = await apiFetch('/api/web-search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: webQuery.trim(), searchMode }),
@@ -287,7 +288,7 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
     setIsAnalyzingMaterial(true);
 
     try {
-      const resp = await fetch('/api/analyze-material', {
+      const resp = await apiFetch('/api/analyze-material', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -465,15 +466,15 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             {(materials.length > 0 || knowledgeNodes.length > 0) && (
               <button
                 type="button"
                 onClick={onClearAllWorkspace}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-600 hover:text-rose-700 bg-slate-100 hover:bg-rose-50 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 hover:text-rose-700 bg-slate-100 hover:bg-rose-50 rounded-md transition-colors whitespace-nowrap cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>清空重置工作区</span>
+                <span>清空重置</span>
               </button>
             )}
 

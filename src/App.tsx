@@ -24,6 +24,10 @@ import {
   PaperSectionChunk,
   InProgressTranslationSnapshot,
   ArchivedPaperEntry,
+  SelectableGeminiModel,
+  ModelRoutingMode,
+  GeminiAccountTier,
+  GeminiUsageLogEntry,
 } from './types/physics';
 import {
   applyDynamicKnowledgeFeedback,
@@ -43,6 +47,21 @@ import {
   DEFAULT_MANUSCRIPT_WIDTH_PERCENT,
   getAnnotationDetailProfile,
 } from './utils/annotationSettings';
+import {
+  DEFAULT_PREFERRED_GEMINI_MODEL,
+  DEFAULT_MODEL_ROUTING_MODE,
+  DEFAULT_GEMINI_ACCOUNT_TIER,
+  DEFAULT_DAILY_TOKEN_BUDGET,
+  GEMINI_MODEL_PROFILES,
+  computeQuotaSummary,
+  computeOfficialModelQuotas,
+  apiFetch,
+  installQuotaFetchInterceptor,
+  setActiveGeminiModelConfig,
+  loadStoredUsageLedger,
+  clearStoredUsageLedger,
+  subscribeToUsageLedger,
+} from './utils/quotaTracker';
 import {
   loadSavedWorkspace,
   saveWorkspaceState,
@@ -71,6 +90,9 @@ const TerminologyAndVerificationView = lazy(() =>
 const PaperHistoryModal = lazy(() =>
   import('./components/PaperHistoryModal').then((m) => ({ default: m.PaperHistoryModal }))
 );
+const QuotaAndModelModal = lazy(() =>
+  import('./components/QuotaAndModelModal').then((m) => ({ default: m.QuotaAndModelModal }))
+);
 import {
   X,
   Copy,
@@ -81,9 +103,12 @@ import {
   FileText,
   SlidersHorizontal,
   History,
+  Activity,
 } from 'lucide-react';
 
 export type { PersistedWorkspaceState };
+
+installQuotaFetchInterceptor();
 
 export default function App() {
   const saved = React.useMemo(() => loadSavedWorkspace(), []);
@@ -147,6 +172,46 @@ export default function App() {
   const [manuscriptWidthPercent, setManuscriptWidthPercent] = useState<number>(
     saved?.settings?.manuscriptWidthPercent ?? DEFAULT_MANUSCRIPT_WIDTH_PERCENT
   );
+  const [preferredGeminiModel, setPreferredGeminiModel] = useState<SelectableGeminiModel>(
+    saved?.settings?.preferredGeminiModel ?? DEFAULT_PREFERRED_GEMINI_MODEL
+  );
+  const [modelRoutingMode, setModelRoutingMode] = useState<ModelRoutingMode>(
+    saved?.settings?.modelRoutingMode ?? DEFAULT_MODEL_ROUTING_MODE
+  );
+  const [geminiAccountTier, setGeminiAccountTier] = useState<GeminiAccountTier>(
+    saved?.settings?.geminiAccountTier ?? DEFAULT_GEMINI_ACCOUNT_TIER
+  );
+  const [dailyTokenBudget, setDailyTokenBudget] = useState<number>(
+    saved?.settings?.dailyTokenBudget ?? DEFAULT_DAILY_TOKEN_BUDGET
+  );
+  const [usageEntries, setUsageEntries] = useState<GeminiUsageLogEntry[]>(() =>
+    loadStoredUsageLedger()
+  );
+  const [quotaModalOpen, setQuotaModalOpen] = useState<boolean>(false);
+
+  // Sync active Gemini model config into the fetch interceptor immediately
+  setActiveGeminiModelConfig(preferredGeminiModel, modelRoutingMode);
+
+  useEffect(() => {
+    setActiveGeminiModelConfig(preferredGeminiModel, modelRoutingMode);
+  }, [preferredGeminiModel, modelRoutingMode]);
+
+  useEffect(() => {
+    return subscribeToUsageLedger((entries) => {
+      setUsageEntries(entries);
+    });
+  }, []);
+
+  const quotaSummary = React.useMemo(
+    () => computeQuotaSummary(usageEntries, dailyTokenBudget),
+    [usageEntries, dailyTokenBudget]
+  );
+
+  const activeOfficialQuota = React.useMemo(() => {
+    const list = computeOfficialModelQuotas(usageEntries, geminiAccountTier);
+    return list.find((q) => q.model === preferredGeminiModel) ?? list[0];
+  }, [usageEntries, geminiAccountTier, preferredGeminiModel]);
+
   const [inProgressTranslation, setInProgressTranslation] =
     useState<InProgressTranslationSnapshot | null>(saved?.inProgressTranslation ?? null);
   const [savedPapersArchive, setSavedPapersArchive] = useState<ArchivedPaperEntry[]>(
@@ -181,6 +246,10 @@ export default function App() {
       settings: {
         annotationDetailLevel,
         manuscriptWidthPercent,
+        preferredGeminiModel,
+        modelRoutingMode,
+        geminiAccountTier,
+        dailyTokenBudget,
       },
       inProgressTranslation,
       savedPapersArchive,
@@ -204,6 +273,10 @@ export default function App() {
     derivationMindMapsByPaperId,
     annotationDetailLevel,
     manuscriptWidthPercent,
+    preferredGeminiModel,
+    modelRoutingMode,
+    geminiAccountTier,
+    dailyTokenBudget,
     inProgressTranslation,
     savedPapersArchive,
   ]);
@@ -347,7 +420,7 @@ export default function App() {
     setReportError(null);
     setIsGeneratingReport(true);
     try {
-      const resp = await fetch('/api/generate-knowledge-report', {
+      const resp = await apiFetch('/api/generate-knowledge-report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ materials, knowledgeNodes }),
@@ -537,7 +610,7 @@ export default function App() {
         });
 
         try {
-          const resp = await fetch('/api/translate-chunk', {
+          const resp = await apiFetch('/api/translate-chunk', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -847,7 +920,7 @@ export default function App() {
         };
 
         try {
-          const resp = await fetch('/api/translate-chunk', {
+          const resp = await apiFetch('/api/translate-chunk', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1071,8 +1144,21 @@ export default function App() {
               </button>
             </nav>
 
-            {/* Zone 3: History Archive, Settings & Primary Export Action */}
+            {/* Zone 3: Quota & Model Switcher, History Archive, Settings & Primary Export Action */}
             <div className="shrink-0 flex items-center gap-1.5 sm:gap-2">
+              <button
+                type="button"
+                data-testid="open-quota-model-modal"
+                onClick={() => setQuotaModalOpen(true)}
+                aria-label={`打开 AI 额度监控与模型选择（当前模型 ${GEMINI_MODEL_PROFILES[preferredGeminiModel].shortName}，今日 RPD ${activeOfficialQuota.todayRequests}/${activeOfficialQuota.limits.rpd}）`}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Activity className="w-3.5 h-3.5 text-blue-600" />
+                <span>{GEMINI_MODEL_PROFILES[preferredGeminiModel].shortName}</span>
+                <span className="hidden lg:inline font-mono-tabular text-[11px] text-slate-500">
+                  · {activeOfficialQuota.todayRequests}/{activeOfficialQuota.limits.rpd.toLocaleString()} RPD
+                </span>
+              </button>
               <button
                 type="button"
                 onClick={() => setHistoryModalOpen(true)}
@@ -1361,7 +1447,7 @@ export default function App() {
         </div>
       </footer>
 
-      {/* Academic Markdown / LaTeX Document Export Dialog */}
+      {/* Academic Markdown Document Export Dialog */}
       {exportModalOpen && (
         <div
           role="dialog"
@@ -1370,13 +1456,13 @@ export default function App() {
           className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
         >
           <div className="bg-white border border-slate-200 rounded-lg max-w-4xl w-full max-h-[85vh] flex flex-col shadow-lg">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+            <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-slate-200">
               <div>
                 <h2 id="export-modal-title" className="text-base font-bold text-slate-900">
-                  导出纯中文学术翻译与精准批注文稿 (Markdown + LaTeX)
+                  导出中文学术翻译与精准批注文稿 (.md)
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  自动剔除您已掌握的 K1 基础知识冗余批注，保留全部公式编号、五类深度批注与术语对照表。
+                  已自动剔除您掌握的 K1 基础知识冗余批注，保留 LaTeX 数学公式与 K2–K4 深度解析。
                 </p>
               </div>
               <button
@@ -1404,7 +1490,7 @@ export default function App() {
                 {copiedMarkdown ? (
                   <>
                     <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>已复制全文 Markdown</span>
+                    <span>已复制 Markdown</span>
                   </>
                 ) : (
                   <>
@@ -1419,7 +1505,7 @@ export default function App() {
                 className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>下载 .md 学术批注文稿</span>
+                <span>下载 .md 批注文稿</span>
               </button>
             </div>
           </div>
@@ -1452,6 +1538,52 @@ export default function App() {
             onDeletePaper={handleDeleteArchivedPaper}
             onExportPaperMarkdown={handleExportArchivedPaperMarkdown}
             onResumeInProgressTranslation={handleResumeIncompleteTranslation}
+          />
+        </Suspense>
+      )}
+
+      {/* AI Quota Real-Time Monitor & Gemini Model Selector Modal */}
+      {quotaModalOpen && (
+        <Suspense fallback={null}>
+          <QuotaAndModelModal
+            isOpen={quotaModalOpen}
+            onClose={() => setQuotaModalOpen(false)}
+            activeWorkspaceTab={activeTab}
+            preferredModel={preferredGeminiModel}
+            onChangePreferredModel={(nextModel) => {
+              setPreferredGeminiModel(nextModel);
+              showToast(
+                `● 已切换首选计算模型为 ${GEMINI_MODEL_PROFILES[nextModel].titleZh}`
+              );
+            }}
+            routingMode={modelRoutingMode}
+            onChangeRoutingMode={(nextMode) => {
+              setModelRoutingMode(nextMode);
+              showToast(
+                nextMode === 'strict'
+                  ? `● 已开启「严格锁定模型」：仅调用 ${GEMINI_MODEL_PROFILES[preferredGeminiModel].shortName}`
+                  : '● 已开启「智能级联容错」：优先调用所选模型，遇超时自动平滑回退'
+              );
+            }}
+            accountTier={geminiAccountTier}
+            onChangeAccountTier={(nextTier) => {
+              setGeminiAccountTier(nextTier);
+              showToast(
+                nextTier === 'tier1'
+                  ? '● 已切换官方配额参考标准为：付费层级 (Tier 1)'
+                  : '● 已切换官方配额参考标准为：免费层级 (Free Tier)'
+              );
+            }}
+            dailyTokenBudget={dailyTokenBudget}
+            onChangeDailyTokenBudget={(nextBudget) => {
+              setDailyTokenBudget(nextBudget);
+              showToast(`● 已更新每日 Token 预算上限为 ${nextBudget.toLocaleString()} Tokens`);
+            }}
+            usageEntries={usageEntries}
+            onClearUsageEntries={() => {
+              clearStoredUsageLedger();
+              showToast('已清空 AI 额度统计流水记录。');
+            }}
           />
         </Suspense>
       )}

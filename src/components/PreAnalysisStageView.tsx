@@ -11,6 +11,7 @@ import { getAnnotationDetailProfile } from '../utils/annotationSettings';
 import { parseArxivAtomXml } from '../utils/arxivParser';
 import { MixedAcademicText } from './LatexRenderer';
 import { DiagnosticAlert } from './DiagnosticAlert';
+import { apiFetch } from '../utils/quotaTracker';
 import {
   Search,
   RefreshCw,
@@ -114,7 +115,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
     setGuideError('');
     setIsAskingGuide(true);
     try {
-      const resp = await fetch('/api/paper-chat', {
+      const resp = await apiFetch('/api/paper-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -179,7 +180,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
     setArxivSuccessMsg('');
     setIsFetchingArxiv(true);
     try {
-      let resp = await fetch('/api/fetch-arxiv', {
+      let resp = await apiFetch('/api/fetch-arxiv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ arxivInput: cleanInput }),
@@ -187,7 +188,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
 
       // Fallback 1: If POST /api/fetch-arxiv returned 404/405 in a proxy environment, try GET
       if (resp.status === 404 || resp.status === 405) {
-        resp = await fetch(`/api/fetch-arxiv?arxivInput=${encodeURIComponent(cleanInput)}`);
+        resp = await apiFetch(`/api/fetch-arxiv?arxivInput=${encodeURIComponent(cleanInput)}`);
       }
 
       if (resp.ok) {
@@ -276,7 +277,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
           reader.readAsDataURL(file);
         });
 
-        const resp = await fetch('/api/parse-pdf', {
+        const resp = await apiFetch('/api/parse-pdf', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -342,7 +343,7 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
     setIsRunningPreAnalysis(true);
 
     try {
-      const resp = await fetch('/api/process-custom-paper', {
+      const resp = await apiFetch('/api/process-custom-paper', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

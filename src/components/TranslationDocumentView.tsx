@@ -34,6 +34,7 @@ import {
 import { LatexBlock, MixedAcademicText } from './LatexRenderer';
 import { DerivationMindMap } from './DerivationMindMap';
 import { DiagnosticAlert } from './DiagnosticAlert';
+import { apiFetch } from '../utils/quotaTracker';
 import {
   CheckCircle2,
   BookOpen,
@@ -550,7 +551,7 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
     setIsSendingChat(true);
 
     try {
-      const resp = await fetch('/api/paper-chat', {
+      const resp = await apiFetch('/api/paper-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -694,7 +695,7 @@ export const TranslationDocumentView: React.FC<TranslationDocumentViewProps> = (
     let generatedTree: DerivationMindMapTree | null = null;
     let fallbackReason = 'Gemini 实时推导导图生成失败，已显示基于原文公式构建的本地结构骨架。';
     try {
-      const resp = await fetch('/api/derivation-mindmap', {
+      const resp = await apiFetch('/api/derivation-mindmap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

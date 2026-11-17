@@ -242,6 +242,26 @@ export function normalizeWorkspaceSettings(raw: unknown): WorkspaceSettings {
       candidate.manuscriptWidthPercent
     );
   }
+  if (
+    candidate.preferredGeminiModel === 'gemini-4-hydrogen' ||
+    candidate.preferredGeminiModel === 'gemini-4-argon' ||
+    candidate.preferredGeminiModel === 'gemini-3.1-flash-lite'
+  ) {
+    normalized.preferredGeminiModel = candidate.preferredGeminiModel;
+  }
+  if (candidate.modelRoutingMode === 'cascade' || candidate.modelRoutingMode === 'strict') {
+    normalized.modelRoutingMode = candidate.modelRoutingMode;
+  }
+  if (candidate.geminiAccountTier === 'free' || candidate.geminiAccountTier === 'tier1') {
+    normalized.geminiAccountTier = candidate.geminiAccountTier;
+  }
+  if (
+    typeof candidate.dailyTokenBudget === 'number' &&
+    Number.isFinite(candidate.dailyTokenBudget) &&
+    candidate.dailyTokenBudget >= 10_000
+  ) {
+    normalized.dailyTokenBudget = Math.round(candidate.dailyTokenBudget);
+  }
   return normalized;
 }
 

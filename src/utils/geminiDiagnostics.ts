@@ -1,4 +1,9 @@
-import type { GenerationErrorCode, GenerationMeta } from '../types/physics.ts';
+import type {
+  GenerationErrorCode,
+  GenerationMeta,
+  SelectableGeminiModel,
+  ModelRoutingMode,
+} from '../types/physics.ts';
 
 /**
  * Supported, active Gemini models aligned with current @google/genai guidance.
@@ -6,8 +11,24 @@ import type { GenerationErrorCode, GenerationMeta } from '../types/physics.ts';
  */
 export const SUPPORTED_GEMINI_TEXT_MODELS = [
   'gemini-4-hydrogen',
+  'gemini-4-argon',
   'gemini-3.1-flash-lite',
 ] as const;
+
+export function normalizePreferredGeminiModel(input: unknown): SelectableGeminiModel {
+  if (
+    input === 'gemini-4-hydrogen' ||
+    input === 'gemini-4-argon' ||
+    input === 'gemini-3.1-flash-lite'
+  ) {
+    return input;
+  }
+  return 'gemini-4-hydrogen';
+}
+
+export function normalizeModelRoutingMode(input: unknown): ModelRoutingMode {
+  return input === 'strict' ? 'strict' : 'cascade';
+}
 
 export interface ClassifiedGeminiError {
   errorCode: GenerationErrorCode;
@@ -241,10 +262,19 @@ export function cleanAndParseJson<T>(rawText: string): { ok: true; data: T } | {
   return { ok: false, error: '模型输出 JSON 不完整或格式损坏（可能因单次响应过长被截断）' };
 }
 
+export interface GenerationTelemetry {
+  requestedModel?: SelectableGeminiModel;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  latencyMs?: number;
+}
+
 export function buildDegradedMeta(
   errorCode: GenerationErrorCode,
   reason: string,
-  retryable: boolean = true
+  retryable: boolean = true,
+  telemetry?: GenerationTelemetry
 ): GenerationMeta {
   return {
     degraded: true,
@@ -253,15 +283,20 @@ export function buildDegradedMeta(
     reason,
     retryable,
     timestamp: new Date().toISOString(),
+    ...telemetry,
   };
 }
 
-export function buildSuccessMeta(modelUsed: string): GenerationMeta {
+export function buildSuccessMeta(
+  modelUsed: string,
+  telemetry?: GenerationTelemetry
+): GenerationMeta {
   return {
     degraded: false,
     sourceMode: 'gemini',
     modelUsed,
     retryable: false,
     timestamp: new Date().toISOString(),
+    ...telemetry,
   };
 }

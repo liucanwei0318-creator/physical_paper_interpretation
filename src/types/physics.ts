@@ -29,14 +29,42 @@ export type GenerationErrorCode =
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
 
+export type SelectableGeminiModel =
+  | 'gemini-4-hydrogen'
+  | 'gemini-4-argon'
+  | 'gemini-3.1-flash-lite';
+
+export type ModelRoutingMode = 'cascade' | 'strict';
+
+export type GeminiAccountTier = 'free' | 'tier1';
+
 export interface GenerationMeta {
   degraded: boolean;
   sourceMode: 'gemini' | 'deterministic_fallback';
   modelUsed?: string;
+  requestedModel?: SelectableGeminiModel;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  latencyMs?: number;
   errorCode?: GenerationErrorCode;
   reason?: string;
   retryable?: boolean;
   timestamp?: string;
+}
+
+export interface GeminiUsageLogEntry {
+  id: string;
+  timestamp: string;
+  endpoint: string;
+  stageLabelZh: string;
+  requestedModel: SelectableGeminiModel;
+  actualModel: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  latencyMs: number;
+  degraded: boolean;
 }
 
 export interface WebGroundingSource {
@@ -336,6 +364,10 @@ export type AnnotationDetailLevel = 1 | 2 | 3 | 4 | 5;
 export interface WorkspaceSettings {
   annotationDetailLevel: AnnotationDetailLevel;
   manuscriptWidthPercent?: number;
+  preferredGeminiModel?: SelectableGeminiModel;
+  modelRoutingMode?: ModelRoutingMode;
+  geminiAccountTier?: GeminiAccountTier;
+  dailyTokenBudget?: number;
 }
 
 export interface InProgressTranslationSnapshot {
