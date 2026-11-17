@@ -4,7 +4,7 @@ import {
   SUPPORTED_GEMINI_TEXT_MODELS,
   classifyGeminiError,
   cleanAndParseJson,
-} from './geminiDiagnostics';
+} from './geminiDiagnostics.ts';
 
 test('supported Gemini text models exclude deprecated 2.0-flash and keep valid defaults', () => {
   assert.ok(!SUPPORTED_GEMINI_TEXT_MODELS.includes('gemini-2.0-flash' as never));

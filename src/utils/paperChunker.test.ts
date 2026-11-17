@@ -4,7 +4,7 @@ import {
   splitPaperIntoSectionChunks,
   buildFallbackSectionFromChunk,
   mergeTranslatedSectionChunks,
-} from './paperChunker';
+} from './paperChunker.ts';
 
 test('splitPaperIntoSectionChunks detects LaTeX and numbered sections without merging them', () => {
   const paper = `
@@ -182,7 +182,7 @@ We thank DFG and NSF for financial support.
 });
 
 test('mergeTranslatedSectionChunks and exportAcademicMarkdown never throw when LLM omits annotations or formulaAnalysis sub-arrays', async () => {
-  const { exportAcademicMarkdown } = await import('./knowledgeEngine');
+  const { exportAcademicMarkdown } = await import('./knowledgeEngine.ts');
 
   // Simulate an LLM response where paragraph 1 omits `annotations` completely,
   // and paragraph 2 has an annotation whose `formulaAnalysis` omits `theoremsUsed`, `symbols`, and `derivationSteps`

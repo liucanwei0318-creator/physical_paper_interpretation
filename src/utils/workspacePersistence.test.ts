@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   WORKSPACE_STORAGE_KEY,
-  StorageAdapter,
+  type StorageAdapter,
   loadSavedWorkspace,
   saveWorkspaceState,
   clearSavedWorkspace,
@@ -11,12 +11,12 @@ import {
   upsertPaperChatTurns,
   filterChatTurnsByParagraph,
   countUserQuestionsByParagraph,
-} from './workspacePersistence';
-import {
+} from './workspacePersistence.ts';
+import type {
   PaperChatTurn,
   PersistedWorkspaceState,
   TranslatedPaperDocument,
-} from '../types/physics';
+} from '../types/physics.ts';
 
 function createMemoryStorage(): StorageAdapter {
   const store = new Map<string, string>();
@@ -224,7 +224,7 @@ test('filterChatTurnsByParagraph and countUserQuestionsByParagraph isolate parag
 });
 
 test('splitAcademicParagraphIntoSentences splits Chinese and English sentences while keeping LaTeX math intact', async () => {
-  const { splitAcademicParagraphIntoSentences } = await import('./workspacePersistence');
+  const { splitAcademicParagraphIntoSentences } = await import('./workspacePersistence.ts');
 
   const zhParagraph =
     '考虑体时空作用量 $S_{\\text{bulk}} = \\int d^{d+1}x \\sqrt{-g} (R - 2\\Lambda)$。边界抵消项用于消除紫外发散；参见公式 $$\\delta S = \\frac{1}{2} \\int d^dx \\sqrt{-\\gamma} T_{ij} \\delta \\gamma^{ij}$$。因此全息重整化流保持有限！';
@@ -248,7 +248,7 @@ test('splitAcademicParagraphIntoSentences splits Chinese and English sentences w
 });
 
 test('upsertArchivedPaper, removeArchivedPaper, and normalizePersistedWorkspaceState manage multi-paper archive and sanitize missing arrays', async () => {
-  const { upsertArchivedPaper, removeArchivedPaper } = await import('./workspacePersistence');
+  const { upsertArchivedPaper, removeArchivedPaper } = await import('./workspacePersistence.ts');
 
   const corruptedDoc = {
     ...samplePaper,

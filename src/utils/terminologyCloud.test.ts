@@ -5,13 +5,13 @@ import {
   countTermOccurrencesInPaper,
   filterTerminologyCloudItems,
   isNonPhysicsAdministrativeTerm,
-} from './terminologyCloud';
+} from './terminologyCloud.ts';
 import {
   normalizeArxivIdentifier,
   parseArxivAtomXml,
   extractStructuredTextFromAr5ivHtml,
-} from './arxivParser';
-import { KnowledgeNode, TranslatedPaperDocument } from '../types/physics';
+} from './arxivParser.ts';
+import type { KnowledgeNode, TranslatedPaperDocument } from '../types/physics.ts';
 
 const samplePaper: TranslatedPaperDocument = {
   paperId: 'paper-rg-01',

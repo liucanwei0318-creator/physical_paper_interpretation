@@ -4,12 +4,12 @@ import {
   shouldDisplayAnnotation,
   applyDynamicKnowledgeFeedback,
   computeKnowledgeMetrics,
-} from './knowledgeEngine';
+} from './knowledgeEngine.ts';
 import {
   parseReadScopeExpression,
   analyzeMaterialScopeDeterministically,
-} from './scopeParser';
-import { KnowledgeNode, PrecisionAnnotation, ReadingMaterial } from '../types/physics';
+} from './scopeParser.ts';
+import type { KnowledgeNode, PrecisionAnnotation, ReadingMaterial } from '../types/physics.ts';
 
 const sampleNodes: KnowledgeNode[] = [
   {

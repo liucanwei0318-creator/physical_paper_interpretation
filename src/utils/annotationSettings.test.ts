@@ -6,7 +6,7 @@ import {
   normalizeWorkspaceSettings,
   getAnnotationDetailProfile,
   buildGeminiAnnotationDetailDirective,
-} from './annotationSettings';
+} from './annotationSettings.ts';
 
 test('normalizeAnnotationDetailLevel clamps and defaults invalid values to Lv.3', () => {
   assert.equal(normalizeAnnotationDetailLevel(undefined), DEFAULT_ANNOTATION_DETAIL_LEVEL);
@@ -56,7 +56,7 @@ test('clampManuscriptWidthPercent and computeManuscriptWidthPercentFromPointer c
     MAX_MANUSCRIPT_WIDTH_PERCENT,
     clampManuscriptWidthPercent,
     computeManuscriptWidthPercentFromPointer,
-  } = await import('./annotationSettings');
+  } = await import('./annotationSettings.ts');
 
   assert.equal(clampManuscriptWidthPercent(undefined), DEFAULT_MANUSCRIPT_WIDTH_PERCENT);
   assert.equal(clampManuscriptWidthPercent('bad'), DEFAULT_MANUSCRIPT_WIDTH_PERCENT);

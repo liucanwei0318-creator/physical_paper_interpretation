@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import {
   ReadingMaterial,
   KnowledgeNode,
@@ -52,12 +52,25 @@ import {
   removeArchivedPaper,
 } from './utils/workspacePersistence';
 import { KnowledgeStageView } from './components/KnowledgeStageView';
-import { PreAnalysisStageView } from './components/PreAnalysisStageView';
-import { TranslationDocumentView } from './components/TranslationDocumentView';
-import { TerminologyAndVerificationView } from './components/TerminologyAndVerificationView';
 import { SettingsModal } from './components/SettingsModal';
-import { PaperHistoryModal } from './components/PaperHistoryModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+
+const PreAnalysisStageView = lazy(() =>
+  import('./components/PreAnalysisStageView').then((m) => ({ default: m.PreAnalysisStageView }))
+);
+const TranslationDocumentView = lazy(() =>
+  import('./components/TranslationDocumentView').then((m) => ({
+    default: m.TranslationDocumentView,
+  }))
+);
+const TerminologyAndVerificationView = lazy(() =>
+  import('./components/TerminologyAndVerificationView').then((m) => ({
+    default: m.TerminologyAndVerificationView,
+  }))
+);
+const PaperHistoryModal = lazy(() =>
+  import('./components/PaperHistoryModal').then((m) => ({ default: m.PaperHistoryModal }))
+);
 import {
   X,
   Copy,
@@ -1149,32 +1162,40 @@ export default function App() {
               onAutoRepairAndReset={handleAutoRepairWorkspaceState}
               onExportBackup={handleDownloadMarkdownFile}
             >
-              <PreAnalysisStageView
-                materials={materials}
-                knowledgeNodes={knowledgeNodes}
-                currentPreAnalysis={currentPreAnalysis}
-                paperTitleEn={paperTitleEn}
-                paperAuthors={paperAuthors}
-                paperArxivId={paperArxivId}
-                paperRawText={paperRawText}
-                onChangePaperTitle={setPaperTitleEn}
-                onChangePaperAuthors={setPaperAuthors}
-                onChangePaperArxivId={setPaperArxivId}
-                onChangePaperRawText={setPaperRawText}
-                isPreAnalysisConfirmed={isPreAnalysisConfirmed}
-                isTranslatingFull={isTranslatingFull}
-                translationProgress={translationProgress}
-                translationError={translationError}
-                onPreAnalysisGenerated={handlePreAnalysisGenerated}
-                onConfirmAndTranslate={handleConfirmAndTranslate}
-                onBackToKnowledgeStage={() => setActiveTab('knowledge')}
-                annotationDetailLevel={annotationDetailLevel}
-                onOpenSettings={() => setSettingsModalOpen(true)}
-                inProgressTranslation={inProgressTranslation}
-                onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
-                hasPartialTranslatedDocument={Boolean(currentDocument)}
-                onSwitchToTranslationTab={() => setActiveTab('translation')}
-              />
+              <Suspense
+                fallback={
+                  <div className="bg-white border border-slate-200 rounded-lg p-12 text-center text-xs font-mono-tabular text-slate-500">
+                    正在加载论文预分析与缺口评估工作台...
+                  </div>
+                }
+              >
+                <PreAnalysisStageView
+                  materials={materials}
+                  knowledgeNodes={knowledgeNodes}
+                  currentPreAnalysis={currentPreAnalysis}
+                  paperTitleEn={paperTitleEn}
+                  paperAuthors={paperAuthors}
+                  paperArxivId={paperArxivId}
+                  paperRawText={paperRawText}
+                  onChangePaperTitle={setPaperTitleEn}
+                  onChangePaperAuthors={setPaperAuthors}
+                  onChangePaperArxivId={setPaperArxivId}
+                  onChangePaperRawText={setPaperRawText}
+                  isPreAnalysisConfirmed={isPreAnalysisConfirmed}
+                  isTranslatingFull={isTranslatingFull}
+                  translationProgress={translationProgress}
+                  translationError={translationError}
+                  onPreAnalysisGenerated={handlePreAnalysisGenerated}
+                  onConfirmAndTranslate={handleConfirmAndTranslate}
+                  onBackToKnowledgeStage={() => setActiveTab('knowledge')}
+                  annotationDetailLevel={annotationDetailLevel}
+                  onOpenSettings={() => setSettingsModalOpen(true)}
+                  inProgressTranslation={inProgressTranslation}
+                  onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
+                  hasPartialTranslatedDocument={Boolean(currentDocument)}
+                  onSwitchToTranslationTab={() => setActiveTab('translation')}
+                />
+              </Suspense>
             </ErrorBoundary>
           )}
 
@@ -1231,37 +1252,45 @@ export default function App() {
                     </div>
                   </section>
                 ) : (
-                  <TranslationDocumentView
-                    document={currentDocument}
-                    knowledgeNodes={knowledgeNodes}
-                    materials={materials}
-                    persistedChatTurns={paperChatHistory[currentDocument.paperId]}
-                    onChatTurnsChange={(paperId, turns) =>
-                      setPaperChatHistory((prev) => upsertPaperChatTurns(prev, paperId, turns))
+                  <Suspense
+                    fallback={
+                      <div className="bg-white border border-slate-200 rounded-lg p-12 text-center text-xs font-mono-tabular text-slate-500">
+                        正在加载双栏深度翻译与精准批注文稿视图...
+                      </div>
                     }
-                    persistedActiveParagraphId={activeParagraphByPaperId[currentDocument.paperId]}
-                    onActiveParagraphChange={(paperId, paragraphId) =>
-                      setActiveParagraphByPaperId((prev) =>
-                        prev[paperId] === paragraphId ? prev : { ...prev, [paperId]: paragraphId }
-                      )
-                    }
-                    persistedMindMaps={derivationMindMapsByPaperId[currentDocument.paperId]}
-                    onMindMapsChange={(paperId, maps) =>
-                      setDerivationMindMapsByPaperId((prev) => ({ ...prev, [paperId]: maps }))
-                    }
-                    onDynamicFeedback={handleDynamicFeedback}
-                    onAppendAnnotation={handleAppendAnnotationToParagraph}
-                    onExportDocument={() => setExportModalOpen(true)}
-                    annotationDetailLevel={annotationDetailLevel}
-                    manuscriptWidthPercent={manuscriptWidthPercent}
-                    onManuscriptWidthPercentChange={setManuscriptWidthPercent}
-                    onOpenSettings={() => setSettingsModalOpen(true)}
-                    onRetryDegradedSections={handleRetryDegradedSections}
-                    retryingChunkIndices={retryingChunkIndices}
-                    isTranslatingFull={isTranslatingFull}
-                    inProgressTranslation={inProgressTranslation}
-                    onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
-                  />
+                  >
+                    <TranslationDocumentView
+                      document={currentDocument}
+                      knowledgeNodes={knowledgeNodes}
+                      materials={materials}
+                      persistedChatTurns={paperChatHistory[currentDocument.paperId]}
+                      onChatTurnsChange={(paperId, turns) =>
+                        setPaperChatHistory((prev) => upsertPaperChatTurns(prev, paperId, turns))
+                      }
+                      persistedActiveParagraphId={activeParagraphByPaperId[currentDocument.paperId]}
+                      onActiveParagraphChange={(paperId, paragraphId) =>
+                        setActiveParagraphByPaperId((prev) =>
+                          prev[paperId] === paragraphId ? prev : { ...prev, [paperId]: paragraphId }
+                        )
+                      }
+                      persistedMindMaps={derivationMindMapsByPaperId[currentDocument.paperId]}
+                      onMindMapsChange={(paperId, maps) =>
+                        setDerivationMindMapsByPaperId((prev) => ({ ...prev, [paperId]: maps }))
+                      }
+                      onDynamicFeedback={handleDynamicFeedback}
+                      onAppendAnnotation={handleAppendAnnotationToParagraph}
+                      onExportDocument={() => setExportModalOpen(true)}
+                      annotationDetailLevel={annotationDetailLevel}
+                      manuscriptWidthPercent={manuscriptWidthPercent}
+                      onManuscriptWidthPercentChange={setManuscriptWidthPercent}
+                      onOpenSettings={() => setSettingsModalOpen(true)}
+                      onRetryDegradedSections={handleRetryDegradedSections}
+                      retryingChunkIndices={retryingChunkIndices}
+                      isTranslatingFull={isTranslatingFull}
+                      inProgressTranslation={inProgressTranslation}
+                      onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
+                    />
+                  </Suspense>
                 )}
               </div>
             </ErrorBoundary>
@@ -1299,11 +1328,19 @@ export default function App() {
                     </div>
                   </section>
                 ) : (
-                  <TerminologyAndVerificationView
-                    document={currentDocument}
-                    feedbackHistory={feedbackHistory}
-                    knowledgeNodes={knowledgeNodes}
-                  />
+                  <Suspense
+                    fallback={
+                      <div className="bg-white border border-slate-200 rounded-lg p-12 text-center text-xs font-mono-tabular text-slate-500">
+                        正在加载专业术语统一表与联网文献核验视图...
+                      </div>
+                    }
+                  >
+                    <TerminologyAndVerificationView
+                      document={currentDocument}
+                      feedbackHistory={feedbackHistory}
+                      knowledgeNodes={knowledgeNodes}
+                    />
+                  </Suspense>
                 )}
               </div>
             </ErrorBoundary>
@@ -1403,17 +1440,21 @@ export default function App() {
       />
 
       {/* Multi-Paper History Archive Modal */}
-      <PaperHistoryModal
-        isOpen={historyModalOpen}
-        onClose={() => setHistoryModalOpen(false)}
-        archivedPapers={savedPapersArchive}
-        activePaperId={currentDocument?.paperId}
-        inProgressTranslation={inProgressTranslation}
-        onSelectPaper={handleSelectArchivedPaper}
-        onDeletePaper={handleDeleteArchivedPaper}
-        onExportPaperMarkdown={handleExportArchivedPaperMarkdown}
-        onResumeInProgressTranslation={handleResumeIncompleteTranslation}
-      />
+      {historyModalOpen && (
+        <Suspense fallback={null}>
+          <PaperHistoryModal
+            isOpen={historyModalOpen}
+            onClose={() => setHistoryModalOpen(false)}
+            archivedPapers={savedPapersArchive}
+            activePaperId={currentDocument?.paperId}
+            inProgressTranslation={inProgressTranslation}
+            onSelectPaper={handleSelectArchivedPaper}
+            onDeletePaper={handleDeleteArchivedPaper}
+            onExportPaperMarkdown={handleExportArchivedPaperMarkdown}
+            onResumeInProgressTranslation={handleResumeIncompleteTranslation}
+          />
+        </Suspense>
+      )}
       </div>
     </ErrorBoundary>
   );

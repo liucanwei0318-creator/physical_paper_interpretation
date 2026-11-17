@@ -122,7 +122,7 @@ export function normalizeExtractedPdfText(raw: string): string {
 
   // Also rejoin inline column-wrap hyphenation when a common word stem is split with "- " mid-line
   text = text.replace(
-    /\b(intro|poten|mea|stochas|fluctu|equi|general|thermo|tempera|partic|experi|differ|distri|approx|calcula|simula|observ|contrib|propor|veloci|positi|dimen|relat|configu|depend|magni|func|sec|equa)-\s+(duced|tial|tials|surement|surements|tic|ation|ations|librium|ized|dynamic|dynamics|ture|cles|mental|ential|bution|imately|tion|tions|lations|tional|ties|sional|uration|ent|tude|нда)/gi,
+    /\b(intro|poten|mea|stochas|fluctu|equi|general|thermo|tempera|partic|experi|differ|distri|approx|calcula|simula|observ|contrib|propor|veloci|positi|dimen|relat|configu|depend|magni|func|sec|equa)-\s+(duced|tial|tials|surement|surements|tic|ation|ations|librium|ized|dynamic|dynamics|ture|cles|mental|ential|bution|imately|tion|tions|lations|tional|ties|sional|uration|ent|tude)/gi,
     '$1$2'
   );
 

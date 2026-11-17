@@ -4,7 +4,7 @@ import {
   extractDoiFromQuery,
   normalizeExtractedPdfText,
   normalizeArxivIdentifier,
-} from './arxivParser';
+} from './arxivParser.ts';
 
 test('extractDoiFromQuery extracts clean DOI from raw strings, URLs, and citation text', () => {
   assert.equal(extractDoiFromQuery('10.1002/cplx.20171'), '10.1002/cplx.20171');

@@ -6,8 +6,8 @@ import {
   buildDeterministicDerivationMindMap,
   normalizeDerivationMindMapTree,
   countMindMapNodes,
-} from './derivationMindMap';
-import { TranslatedParagraph } from '../types/physics';
+} from './derivationMindMap.ts';
+import type { TranslatedParagraph } from '../types/physics.ts';
 
 const complexParagraph: TranslatedParagraph = {
   id: 'p-1-2',
