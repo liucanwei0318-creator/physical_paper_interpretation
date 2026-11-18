@@ -327,6 +327,34 @@ test('computeModelRecommendation adapts to task type and suggests Flash-Lite whe
   assert.equal(recCriticalDeep.recommendedModel, 'gemini-3.1-flash-lite');
   assert.equal(recCriticalDeep.shouldPromptSwitch, true);
   assert.match(recCriticalDeep.rationaleZh, /Flash-Lite/);
+
+  // 4. Observed fallback/rate-limit on Hydrogen -> prompts direct switch to Flash-Lite
+  const fallbackEntries = [
+    {
+      id: 'fb1',
+      timestamp: '2026-11-17T09:50:00.000Z',
+      endpoint: '/api/web-search',
+      stageLabelZh: '联网文献检索与综述',
+      requestedModel: 'gemini-4-hydrogen' as const,
+      actualModel: 'gemini-3.1-flash-lite',
+      promptTokens: 1100,
+      completionTokens: 900,
+      totalTokens: 2000,
+      latencyMs: 6500,
+      degraded: false,
+    },
+  ];
+  const recObservedFallback = computeModelRecommendation({
+    taskType: 'full_translation',
+    currentPreferredModel: 'gemini-4-hydrogen',
+    summary: ampleSummary,
+    officialQuotas: ampleOfficial,
+    entries: fallbackEntries,
+  });
+  assert.equal(recObservedFallback.budgetStatus, 'tight');
+  assert.equal(recObservedFallback.recommendedModel, 'gemini-3.1-flash-lite');
+  assert.equal(recObservedFallback.shouldPromptSwitch, true);
+  assert.match(recObservedFallback.headlineZh, /回退.*Flash-Lite/);
 });
 
 

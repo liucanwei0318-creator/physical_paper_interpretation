@@ -100,6 +100,7 @@ export interface GeminiModelProfile {
   speedRating: string;
   reasoningRating: string;
   recommendedForZh: string;
+  freeTierWarningZh?: string;
 }
 
 export const GEMINI_MODEL_PROFILES: Record<SelectableGeminiModel, GeminiModelProfile> = {
@@ -117,13 +118,14 @@ export const GEMINI_MODEL_PROFILES: Record<SelectableGeminiModel, GeminiModelPro
   'gemini-4-argon': {
     model: 'gemini-4-argon',
     shortName: 'Argon',
-    badgeText: '深度推理旗舰 · 严密推导',
+    badgeText: '深度推理旗舰 · 免费层每日仅 100 次',
     titleZh: 'Gemini 4 Argon (gemini-4-argon)',
     descriptionZh:
       '针对复杂张量演算、高阶微扰圈图、全息纠缠熵与数学物理定理证明强化深度推理，适合疑难段落精读与伴读追问。',
     speedRating: '中等 (Deep Reasoning)',
     reasoningRating: '极高 (Flagship Pro)',
     recommendedForZh: '复杂数学推导还原、伴读导师深度追问、公式推导思维导图',
+    freeTierWarningZh: '免费层每日仅 100 次 (100 RPD / 5 RPM)，超限易触发 429',
   },
   'gemini-3.1-flash-lite': {
     model: 'gemini-3.1-flash-lite',
@@ -643,8 +645,9 @@ export function computeModelRecommendation(params: {
   currentPreferredModel: SelectableGeminiModel;
   summary: QuotaUsageSummary;
   officialQuotas: OfficialModelQuotaStatus[];
+  entries?: GeminiUsageLogEntry[];
 }): ModelRecommendationResult {
-  const { taskType, currentPreferredModel, summary, officialQuotas } = params;
+  const { taskType, currentPreferredModel, summary, officialQuotas, entries = [] } = params;
   const taskProfile = QUOTA_TASK_PROFILES[taskType] || QUOTA_TASK_PROFILES.full_translation;
   const activeQuota =
     officialQuotas.find((q) => q.model === currentPreferredModel) || officialQuotas[0];
@@ -659,18 +662,37 @@ export function computeModelRecommendation(params: {
 
   const peakUtilizationPercent = Math.max(dailyTokenPercent, rpdPercent, rpmPercent, tpmPercent);
 
+  // Check if recent requests for currentPreferredModel experienced fallback or degradation
+  const recentForPreferred = Array.isArray(entries)
+    ? entries
+        .filter((e) => e && e.requestedModel === currentPreferredModel)
+        .slice(0, 5)
+    : [];
+  const recentFallbackCount = recentForPreferred.filter(
+    (e) => e.degraded || (e.actualModel && e.actualModel !== currentPreferredModel)
+  ).length;
+  const hasObservedFallback =
+    currentPreferredModel !== 'gemini-3.1-flash-lite' && recentFallbackCount > 0;
+
   let budgetStatus: BudgetPressureLevel = 'ample';
   let budgetStatusLabelZh = '● 预算充裕';
   if (peakUtilizationPercent >= 85) {
     budgetStatus = 'critical';
     budgetStatusLabelZh = '▲ 预算告急';
-  } else if (peakUtilizationPercent >= 60) {
+  } else if (peakUtilizationPercent >= 60 || hasObservedFallback) {
     budgetStatus = 'tight';
-    budgetStatusLabelZh = '▲ 预算紧张';
+    budgetStatusLabelZh = hasObservedFallback ? '▲ 模型回退/受限' : '▲ 预算紧张';
   }
 
   let pressureSourceZh = `日 Token 预算已用 ${dailyTokenPercent}%`;
-  if (rpdPercent >= dailyTokenPercent && rpdPercent >= rpmPercent && rpdPercent >= tpmPercent && rpdPercent > 0) {
+  if (hasObservedFallback) {
+    pressureSourceZh = `${GEMINI_MODEL_PROFILES[currentPreferredModel].shortName} 最近 ${recentFallbackCount} 次请求触发限流或超时回退`;
+  } else if (
+    rpdPercent >= dailyTokenPercent &&
+    rpdPercent >= rpmPercent &&
+    rpdPercent >= tpmPercent &&
+    rpdPercent > 0
+  ) {
     pressureSourceZh = `${activeQuota.shortName} 今日 RPD 已用 ${rpdPercent}%`;
   } else if (rpmPercent >= dailyTokenPercent && rpmPercent >= tpmPercent && rpmPercent > 0) {
     pressureSourceZh = `${activeQuota.shortName} 60 秒 RPM 已用 ${rpmPercent}%`;
@@ -679,7 +701,7 @@ export function computeModelRecommendation(params: {
   }
 
   let recommendedModel: SelectableGeminiModel = taskProfile.defaultModel;
-  if (budgetStatus === 'critical') {
+  if (budgetStatus === 'critical' || hasObservedFallback) {
     recommendedModel = 'gemini-3.1-flash-lite';
   } else if (budgetStatus === 'tight') {
     if (taskType === 'deep_derivation') {
@@ -700,7 +722,11 @@ export function computeModelRecommendation(params: {
   let headlineZh = '';
   let rationaleZh = '';
 
-  if (budgetStatus === 'critical') {
+  if (hasObservedFallback && budgetStatus !== 'critical') {
+    headlineZh = `检测到 ${GEMINI_MODEL_PROFILES[currentPreferredModel].shortName} 触发限流/超时回退：建议直连轻量级 Flash-Lite`;
+    rationaleZh =
+      `${pressureSourceZh}。切换至 ${recommendedProfile.titleZh} 可省去前置探测等待时间，直接以最高可用性与并发配额完成「${taskProfile.labelZh}」。`;
+  } else if (budgetStatus === 'critical') {
     headlineZh = shouldPromptSwitch
       ? `预算告急（峰值 ${peakUtilizationPercent}%）：建议立即切换至轻量级 Flash-Lite`
       : `预算告急（峰值 ${peakUtilizationPercent}%）：当前已启用 Flash-Lite 保底省流模式`;
@@ -800,16 +826,6 @@ export function setActiveGeminiModelConfig(
 ): void {
   currentPreferredModel = normalizePreferredGeminiModel(model);
   currentRoutingMode = normalizeModelRoutingMode(routingMode);
-}
-
-export function getActiveGeminiModelConfig(): {
-  preferredModel: SelectableGeminiModel;
-  routingMode: ModelRoutingMode;
-} {
-  return {
-    preferredModel: currentPreferredModel,
-    routingMode: currentRoutingMode,
-  };
 }
 
 export function loadStoredUsageLedger(): GeminiUsageLogEntry[] {
@@ -950,5 +966,22 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
 export function installQuotaFetchInterceptor(): void {
   if (typeof window === 'undefined' || interceptorInstalled) return;
   interceptorInstalled = true;
+  try {
+    const desc =
+      Object.getOwnPropertyDescriptor(window, 'fetch') ||
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(window), 'fetch');
+    if (!desc || desc.writable || typeof desc.set === 'function') {
+      window.fetch = apiFetch;
+    } else if (desc.configurable) {
+      Object.defineProperty(window, 'fetch', {
+        value: apiFetch,
+        writable: true,
+        configurable: true,
+      });
+    }
+  } catch {
+    // In sandboxed iframes where window.fetch is non-writable and non-configurable,
+    // all components invoke apiFetch() directly.
+  }
 }
 

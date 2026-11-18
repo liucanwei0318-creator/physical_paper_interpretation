@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { extractText } from 'unpdf';
 import {
   analyzeMaterialScopeDeterministically,
@@ -89,14 +89,48 @@ interface RequestModelContext {
 }
 
 const requestContextStorage = new AsyncLocalStorage<RequestModelContext>();
-const serverUsageLedger: GeminiUsageLogEntry[] = [];
 const MAX_SERVER_LEDGER_ENTRIES = 250;
+const SERVER_LEDGER_FILE = path.join(__dirname, '.aistudio', 'server-usage-ledger.json');
+
+function loadPersistedServerLedger(): GeminiUsageLogEntry[] {
+  try {
+    if (fs.existsSync(SERVER_LEDGER_FILE)) {
+      const raw = fs.readFileSync(SERVER_LEDGER_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.slice(0, MAX_SERVER_LEDGER_ENTRIES);
+      }
+    }
+  } catch {
+    // Ignore read errors on cold start or read-only fs
+  }
+  return [];
+}
+
+function flushServerLedgerToDisk(entries: GeminiUsageLogEntry[]): void {
+  try {
+    const dir = path.dirname(SERVER_LEDGER_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(
+      SERVER_LEDGER_FILE,
+      JSON.stringify(entries.slice(0, MAX_SERVER_LEDGER_ENTRIES)),
+      'utf-8'
+    );
+  } catch {
+    // Ignore disk write errors in ephemeral sandboxes
+  }
+}
+
+const serverUsageLedger: GeminiUsageLogEntry[] = loadPersistedServerLedger();
 
 function recordServerUsageEntry(entry: GeminiUsageLogEntry): void {
   serverUsageLedger.unshift(entry);
   if (serverUsageLedger.length > MAX_SERVER_LEDGER_ENTRIES) {
     serverUsageLedger.length = MAX_SERVER_LEDGER_ENTRIES;
   }
+  flushServerLedgerToDisk(serverUsageLedger);
 }
 
 // Tracks temporary cooldown timestamps (ms) for primary models that timed out or returned unavailable errors
@@ -195,23 +229,29 @@ async function generateWithCascadeDetailed(
 
   for (let idx = 0; idx < orderedModels.length; idx++) {
     const modelName = orderedModels[idx];
-    // Skip a cooled-down model only in cascade mode when another fallback model is available
+    const hasHealthyAlternative = orderedModels.some(
+      (m) => m !== modelName && (modelCooldownUntil.get(m) ?? 0) <= Date.now()
+    );
+    // Skip any cooled-down model (including requestedModel) in cascade mode when a healthy fallback exists
     if (
       routingMode !== 'strict' &&
-      modelName !== requestedModel &&
       (modelCooldownUntil.get(modelName) ?? 0) > Date.now() &&
-      orderedModels.length > 1
+      hasHealthyAlternative
     ) {
       continue;
     }
 
     const perModelTimeoutMs =
       routingMode === 'strict'
-        ? timeoutMs
+        ? modelName === 'gemini-4-argon'
+          ? Math.max(timeoutMs, 120_000)
+          : modelName === 'gemini-4-hydrogen'
+          ? Math.max(timeoutMs, 90_000)
+          : Math.max(timeoutMs, 45_000)
         : modelName === 'gemini-4-argon'
-        ? Math.min(25000, timeoutMs)
+        ? Math.min(25_000, timeoutMs)
         : modelName === 'gemini-4-hydrogen'
-        ? Math.min(10000, timeoutMs)
+        ? Math.min(12_000, timeoutMs)
         : timeoutMs;
     const maxAttempts = modelName === 'gemini-3.1-flash-lite' ? 2 : 1;
 
@@ -235,6 +275,11 @@ async function generateWithCascadeDetailed(
         }
         if (options.systemInstruction) {
           config.systemInstruction = options.systemInstruction;
+        }
+        if (modelName === 'gemini-4-hydrogen') {
+          config.thinkingConfig = {
+            thinkingLevel: ThinkingLevel.LOW,
+          };
         }
 
         const response = await Promise.race([
@@ -680,14 +725,6 @@ async function searchOpenLibraryWithToc(
   }
 }
 
-function cleanJsonString(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith('```')) {
-    return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  }
-  return trimmed;
-}
-
 /**
  * Scrapes real web snippets & Wikipedia extracts for a book's Table of Contents (目录 / Chapters).
  */
@@ -902,7 +939,7 @@ ${webContext.snippets.join('\n')}
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '35mb' }));
 
@@ -941,12 +978,14 @@ async function startServer() {
     res.json({
       ok: true,
       supportedModels: SUPPORTED_GEMINI_TEXT_MODELS,
+      persistenceMode: 'single-instance-disk-backed',
       recentEntries: serverUsageLedger.slice(0, 100),
     });
   });
 
   app.post('/api/usage-stats/reset', (_req, res) => {
     serverUsageLedger.length = 0;
+    flushServerLedgerToDisk(serverUsageLedger);
     res.json({ ok: true });
   });
 

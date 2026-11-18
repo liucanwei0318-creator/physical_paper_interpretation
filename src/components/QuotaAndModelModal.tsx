@@ -165,8 +165,9 @@ export const QuotaAndModelModal: React.FC<QuotaAndModelModalProps> = ({
         currentPreferredModel: preferredModel,
         summary,
         officialQuotas: officialModelQuotas,
+        entries: effectiveEntries,
       }),
-    [selectedTaskType, preferredModel, summary, officialModelQuotas]
+    [selectedTaskType, preferredModel, summary, officialModelQuotas, effectiveEntries]
   );
 
   const resetCountdown = useMemo(() => computePacificResetCountdown(nowMs), [nowMs]);
@@ -333,6 +334,14 @@ export const QuotaAndModelModal: React.FC<QuotaAndModelModalProps> = ({
                         {quotaStat.limits.rpm} RPM · {formatCompactTokens(quotaStat.limits.tpm)} TPM ·{' '}
                         {quotaStat.limits.rpd.toLocaleString()} RPD
                       </div>
+                      {accountTier === 'free' && profile.freeTierWarningZh && (
+                        <div
+                          data-testid={`model-warning-${modelKey}`}
+                          className="text-[11px] font-medium text-amber-800 pt-0.5"
+                        >
+                          ▲ {profile.freeTierWarningZh}
+                        </div>
+                      )}
                     </div>
                   </button>
                 );

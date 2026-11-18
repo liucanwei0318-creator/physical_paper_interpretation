@@ -5,11 +5,6 @@ export const DEFAULT_MANUSCRIPT_WIDTH_PERCENT = 58;
 export const MIN_MANUSCRIPT_WIDTH_PERCENT = 36;
 export const MAX_MANUSCRIPT_WIDTH_PERCENT = 76;
 
-export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
-  annotationDetailLevel: DEFAULT_ANNOTATION_DETAIL_LEVEL,
-  manuscriptWidthPercent: DEFAULT_MANUSCRIPT_WIDTH_PERCENT,
-};
-
 export function clampManuscriptWidthPercent(raw: unknown): number {
   const num = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(num)) {

@@ -53,7 +53,6 @@ import {
   DEFAULT_GEMINI_ACCOUNT_TIER,
   DEFAULT_DAILY_TOKEN_BUDGET,
   GEMINI_MODEL_PROFILES,
-  computeQuotaSummary,
   computeOfficialModelQuotas,
   apiFetch,
   installQuotaFetchInterceptor,
@@ -93,11 +92,11 @@ const PaperHistoryModal = lazy(() =>
 const QuotaAndModelModal = lazy(() =>
   import('./components/QuotaAndModelModal').then((m) => ({ default: m.QuotaAndModelModal }))
 );
+const AcademicExportModal = lazy(() =>
+  import('./components/AcademicExportModal').then((m) => ({ default: m.AcademicExportModal }))
+);
 import {
   X,
-  Copy,
-  Check,
-  Download,
   ArrowRight,
   BookOpen,
   FileText,
@@ -202,11 +201,6 @@ export default function App() {
     });
   }, []);
 
-  const quotaSummary = React.useMemo(
-    () => computeQuotaSummary(usageEntries, dailyTokenBudget),
-    [usageEntries, dailyTokenBudget]
-  );
-
   const activeOfficialQuota = React.useMemo(() => {
     const list = computeOfficialModelQuotas(usageEntries, geminiAccountTier);
     return list.find((q) => q.model === preferredGeminiModel) ?? list[0];
@@ -223,7 +217,6 @@ export default function App() {
 
   // Export Modal State
   const [exportModalOpen, setExportModalOpen] = useState<boolean>(false);
-  const [copiedMarkdown, setCopiedMarkdown] = useState<boolean>(false);
 
   // Persist user's workspace changes to localStorage
   useEffect(() => {
@@ -1049,12 +1042,6 @@ export default function App() {
     [currentDocument, knowledgeNodes, report, currentPreAnalysis]
   );
 
-  const handleCopyMarkdown = () => {
-    navigator.clipboard.writeText(exportedMarkdownText);
-    setCopiedMarkdown(true);
-    setTimeout(() => setCopiedMarkdown(false), 2500);
-  };
-
   const handleDownloadMarkdownFile = () => {
     const blob = new Blob([exportedMarkdownText], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1447,69 +1434,18 @@ export default function App() {
         </div>
       </footer>
 
-      {/* Academic Markdown Document Export Dialog */}
+      {/* Academic Multi-Format Document Export Dialog (Markdown / LaTeX / BibTeX) */}
       {exportModalOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="export-modal-title"
-          className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
-        >
-          <div className="bg-white border border-slate-200 rounded-lg max-w-4xl w-full max-h-[85vh] flex flex-col shadow-lg">
-            <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-slate-200">
-              <div>
-                <h2 id="export-modal-title" className="text-base font-bold text-slate-900">
-                  导出中文学术翻译与精准批注文稿 (.md)
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  已自动剔除您掌握的 K1 基础知识冗余批注，保留 LaTeX 数学公式与 K2–K4 深度解析。
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setExportModalOpen(false)}
-                aria-label="关闭导出窗口"
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 flex-1 overflow-y-auto bg-slate-50">
-              <pre className="text-xs font-mono-tabular text-slate-800 whitespace-pre-wrap leading-relaxed bg-white p-4 border border-slate-200 rounded-md">
-                {exportedMarkdownText}
-              </pre>
-            </div>
-
-            <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-end gap-3 bg-white">
-              <button
-                type="button"
-                onClick={handleCopyMarkdown}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-md transition-colors cursor-pointer"
-              >
-                {copiedMarkdown ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>已复制 Markdown</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>复制 Markdown 源码</span>
-                  </>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={handleDownloadMarkdownFile}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>下载 .md 批注文稿</span>
-              </button>
-            </div>
-          </div>
-        </div>
+        <Suspense fallback={null}>
+          <AcademicExportModal
+            isOpen={exportModalOpen}
+            onClose={() => setExportModalOpen(false)}
+            document={currentDocument}
+            knowledgeNodes={knowledgeNodes}
+            report={report}
+            preAnalysis={currentPreAnalysis}
+          />
+        </Suspense>
       )}
 
       {/* Global Settings Modal */}

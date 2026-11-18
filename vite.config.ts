@@ -18,14 +18,11 @@ export default defineConfig(() => {
             if (id.includes('node_modules/katex')) {
               return 'vendor-katex';
             }
-            if (id.includes('node_modules/lucide-react') || id.includes('node_modules/motion')) {
+            if (id.includes('node_modules/lucide-react')) {
               return 'vendor-ui';
             }
             if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
               return 'vendor-react';
-            }
-            if (id.includes('/src/data/initialPhysicsData')) {
-              return 'data-initial-physics';
             }
             if (id.includes('/src/utils/scopeParser')) {
               return 'utils-scope-parser';
