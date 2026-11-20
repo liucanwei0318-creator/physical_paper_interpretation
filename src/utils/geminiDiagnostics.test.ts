@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   SUPPORTED_GEMINI_TEXT_MODELS,
   classifyGeminiError,
+  classifyModelProbeError,
   cleanAndParseJson,
   normalizePreferredGeminiModel,
   normalizeModelRoutingMode,
@@ -18,13 +19,21 @@ import {
   computeModelRecommendation,
 } from './quotaTracker.ts';
 
-test('supported Gemini text models exclude deprecated 2.0-flash and include Hydrogen, Argon, and Flash-Lite', () => {
+test('supported Gemini text models exclude deprecated 2.0-flash and include Hydrogen, Neon, Carbon, Argon, and Flash-Lite', () => {
   assert.ok(!SUPPORTED_GEMINI_TEXT_MODELS.includes('gemini-2.0-flash' as never));
   assert.deepEqual(
     [...SUPPORTED_GEMINI_TEXT_MODELS],
-    ['gemini-4-hydrogen', 'gemini-4-argon', 'gemini-3.1-flash-lite']
+    [
+      'gemini-4-hydrogen',
+      'gemini-4-neon',
+      'gemini-4-carbon',
+      'gemini-4-argon',
+      'gemini-3.1-flash-lite',
+    ]
   );
   assert.equal(normalizePreferredGeminiModel('gemini-4-argon'), 'gemini-4-argon');
+  assert.equal(normalizePreferredGeminiModel('gemini-4-neon'), 'gemini-4-neon');
+  assert.equal(normalizePreferredGeminiModel('gemini-4-carbon'), 'gemini-4-carbon');
   assert.equal(normalizePreferredGeminiModel('gemini-4-hydrogen'), 'gemini-4-hydrogen');
   assert.equal(normalizePreferredGeminiModel('gemini-3.1-flash-lite'), 'gemini-3.1-flash-lite');
   assert.equal(normalizePreferredGeminiModel('unknown-model'), 'gemini-4-hydrogen');
@@ -110,6 +119,51 @@ test('classifyGeminiError accurately detects 429 quota, 403 auth, timeout, and n
   const netErr = classifyGeminiError(new Error('TypeError: fetch failed ECONNRESET'));
   assert.equal(netErr.errorCode, 'NETWORK_ERROR');
   assert.equal(netErr.retryable, true);
+});
+
+test('classifyModelProbeError distinguishes paid 429, free 429, auth 403, not_found 404, and timeout', () => {
+  const paid429 = classifyModelProbeError(
+    'gemini-4-neon',
+    new Error('429 RESOURCE_EXHAUSTED: Quota exceeded for metric'),
+    210
+  );
+  assert.equal(paid429.ok, false);
+  assert.equal(paid429.status, 'paid_or_quota_429');
+  assert.equal(paid429.httpStatus, 429);
+  assert.match(paid429.statusLabelZh, /付费/);
+  assert.match(paid429.detailZh, /Settings > Secrets/);
+
+  const free429 = classifyModelProbeError(
+    'gemini-3.1-flash-lite',
+    new Error('429 RESOURCE_EXHAUSTED'),
+    180
+  );
+  assert.equal(free429.status, 'paid_or_quota_429');
+  assert.match(free429.statusLabelZh, /配额/);
+
+  const auth403 = classifyModelProbeError(
+    'gemini-4-hydrogen',
+    new Error('403 PERMISSION_DENIED: API_KEY_INVALID'),
+    150
+  );
+  assert.equal(auth403.status, 'auth_error');
+  assert.equal(auth403.httpStatus, 403);
+
+  const notFound = classifyModelProbeError(
+    'gemini-4-carbon',
+    new Error('404 NOT_FOUND: models/gemini-4-carbon is not found'),
+    120
+  );
+  assert.equal(notFound.status, 'not_found');
+  assert.equal(notFound.httpStatus, 404);
+
+  const timeout = classifyModelProbeError(
+    'gemini-4-hydrogen',
+    new Error('TimeoutError: 12000ms exceeded'),
+    12001
+  );
+  assert.equal(timeout.status, 'timeout');
+  assert.match(timeout.statusLabelZh, /超时/);
 });
 
 test('cleanAndParseJson strips code fences and reports truncated JSON cleanly', () => {
@@ -212,6 +266,14 @@ test('computeOfficialModelQuotas calculates PT-day RPD, 60s rolling RPM/TPM, and
   assert.equal(argonTier1.limits.rpm, 150);
   assert.equal(argonTier1.limits.tpm, 2_000_000);
   assert.equal(argonTier1.todayRequests, 2);
+
+  const neonTier1 = tier1Quotas.find((q) => q.model === 'gemini-4-neon')!;
+  assert.equal(neonTier1.limits.rpd, 2500);
+  assert.equal(neonTier1.limits.rpm, 300);
+
+  const carbonTier1 = tier1Quotas.find((q) => q.model === 'gemini-4-carbon')!;
+  assert.equal(carbonTier1.limits.rpd, 1000);
+  assert.equal(carbonTier1.limits.rpm, 150);
 });
 
 test('computePacificResetCountdown computes exact hours remaining to next 00:00 PT', () => {
@@ -257,6 +319,15 @@ test('computeModelRecommendation adapts to task type and suggests Flash-Lite whe
   assert.equal(recDeepAmple.budgetStatus, 'ample');
   assert.equal(recDeepAmple.recommendedModel, 'gemini-4-argon');
   assert.equal(recDeepAmple.shouldPromptSwitch, true);
+
+  const recNeonDeepAmple = computeModelRecommendation({
+    taskType: 'deep_derivation',
+    currentPreferredModel: 'gemini-4-neon',
+    summary: ampleSummary,
+    officialQuotas: ampleOfficial,
+  });
+  assert.equal(recNeonDeepAmple.recommendedModel, 'gemini-4-neon');
+  assert.equal(recNeonDeepAmple.shouldPromptSwitch, false);
 
   const recTranslationAmple = computeModelRecommendation({
     taskType: 'full_translation',

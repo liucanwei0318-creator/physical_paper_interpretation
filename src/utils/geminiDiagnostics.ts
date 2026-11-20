@@ -3,6 +3,7 @@ import type {
   GenerationMeta,
   SelectableGeminiModel,
   ModelRoutingMode,
+  ModelConnectivityProbeResult,
 } from '../types/physics.ts';
 
 /**
@@ -11,6 +12,8 @@ import type {
  */
 export const SUPPORTED_GEMINI_TEXT_MODELS = [
   'gemini-4-hydrogen',
+  'gemini-4-neon',
+  'gemini-4-carbon',
   'gemini-4-argon',
   'gemini-3.1-flash-lite',
 ] as const;
@@ -18,6 +21,8 @@ export const SUPPORTED_GEMINI_TEXT_MODELS = [
 export function normalizePreferredGeminiModel(input: unknown): SelectableGeminiModel {
   if (
     input === 'gemini-4-hydrogen' ||
+    input === 'gemini-4-neon' ||
+    input === 'gemini-4-carbon' ||
     input === 'gemini-4-argon' ||
     input === 'gemini-3.1-flash-lite'
   ) {
@@ -108,6 +113,107 @@ export function classifyGeminiError(err: unknown): ClassifiedGeminiError {
       ? `Gemini 调用异常（${snippet}），可点击重试。`
       : 'Gemini 调用返回未知异常，请稍后重试。',
     retryable: true,
+  };
+}
+
+export function isPaidTierGeminiModel(model: SelectableGeminiModel): boolean {
+  return (
+    model === 'gemini-4-neon' ||
+    model === 'gemini-4-carbon' ||
+    model === 'gemini-4-argon'
+  );
+}
+
+export function classifyModelProbeError(
+  model: SelectableGeminiModel,
+  err: unknown,
+  latencyMs: number
+): ModelConnectivityProbeResult {
+  const rawMessage =
+    err instanceof Error
+      ? err.message
+      : typeof err === 'string'
+      ? err
+      : JSON.stringify(err ?? '');
+  const lower = rawMessage.toLowerCase();
+  const safeLatency = Math.max(0, Math.round(latencyMs));
+
+  if (
+    lower.includes('429') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit')
+  ) {
+    const paidModel = isPaidTierGeminiModel(model);
+    return {
+      model,
+      ok: false,
+      status: 'paid_or_quota_429',
+      statusLabelZh: paidModel ? '429 需付费 Key / 配额受限' : '429 配额已满或限流',
+      detailZh: paidModel
+        ? 'Google 服务端已识别该模型，但返回 429 RESOURCE_EXHAUSTED：此模型需在 Settings > Secrets 中绑定开启结算（Billing）的付费 API Key。'
+        : '当前 API Key 对该模型的免费配额或并发频率已达上限 (429)，请稍后重试或绑定付费 Key。',
+      latencyMs: safeLatency,
+      httpStatus: 429,
+    };
+  }
+
+  if (
+    lower.includes('401') ||
+    lower.includes('403') ||
+    lower.includes('api_key_invalid') ||
+    lower.includes('permission_denied') ||
+    lower.includes('unauthenticated') ||
+    lower.includes('api key not valid')
+  ) {
+    return {
+      model,
+      ok: false,
+      status: 'auth_error',
+      statusLabelZh: '403 密钥无效或无权限',
+      detailZh: '当前 GEMINI_API_KEY 鉴权失败或无权访问该模型，请前往 Settings > Secrets 核对密钥。',
+      latencyMs: safeLatency,
+      httpStatus: lower.includes('401') ? 401 : 403,
+    };
+  }
+
+  if (lower.includes('404') || lower.includes('not_found') || lower.includes('not found')) {
+    return {
+      model,
+      ok: false,
+      status: 'not_found',
+      statusLabelZh: '404 模型不可用',
+      detailZh: 'Google API 返回 404 NOT_FOUND，当前区域或账号暂未开放该模型 ID。',
+      latencyMs: safeLatency,
+      httpStatus: 404,
+    };
+  }
+
+  if (
+    lower.includes('timeout') ||
+    lower.includes('aborterror') ||
+    lower.includes('timeouterror') ||
+    lower.includes('etimedout') ||
+    lower.includes('deadline_exceeded')
+  ) {
+    return {
+      model,
+      ok: false,
+      status: 'timeout',
+      statusLabelZh: `响应超时 (>${(safeLatency / 1000).toFixed(0)}s)`,
+      detailZh: '在检测限时内未收到响应（当前时段该模型可能存在排队或长思考延迟），建议启用智能级联模式。',
+      latencyMs: safeLatency,
+    };
+  }
+
+  const snippet = rawMessage.replace(/\s+/g, ' ').trim().slice(0, 120);
+  return {
+    model,
+    ok: false,
+    status: 'error',
+    statusLabelZh: '调用异常',
+    detailZh: snippet ? `返回异常：${snippet}` : '连接模型端点失败，请稍后重试。',
+    latencyMs: safeLatency,
   };
 }
 

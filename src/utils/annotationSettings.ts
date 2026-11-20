@@ -239,6 +239,8 @@ export function normalizeWorkspaceSettings(raw: unknown): WorkspaceSettings {
   }
   if (
     candidate.preferredGeminiModel === 'gemini-4-hydrogen' ||
+    candidate.preferredGeminiModel === 'gemini-4-neon' ||
+    candidate.preferredGeminiModel === 'gemini-4-carbon' ||
     candidate.preferredGeminiModel === 'gemini-4-argon' ||
     candidate.preferredGeminiModel === 'gemini-3.1-flash-lite'
   ) {

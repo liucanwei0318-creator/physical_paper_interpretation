@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import {
   ReadingMaterial,
   KnowledgeNode,
@@ -70,29 +70,39 @@ import {
   removeArchivedPaper,
 } from './utils/workspacePersistence';
 import { KnowledgeStageView } from './components/KnowledgeStageView';
-import { SettingsModal } from './components/SettingsModal';
+import { PreAnalysisStageView } from './components/PreAnalysisStageView';
+import { TranslationDocumentView } from './components/TranslationDocumentView';
+import { TerminologyAndVerificationView } from './components/TerminologyAndVerificationView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
-const PreAnalysisStageView = lazy(() =>
-  import('./components/PreAnalysisStageView').then((m) => ({ default: m.PreAnalysisStageView }))
-);
-const TranslationDocumentView = lazy(() =>
-  import('./components/TranslationDocumentView').then((m) => ({
-    default: m.TranslationDocumentView,
-  }))
-);
-const TerminologyAndVerificationView = lazy(() =>
-  import('./components/TerminologyAndVerificationView').then((m) => ({
-    default: m.TerminologyAndVerificationView,
-  }))
-);
-const PaperHistoryModal = lazy(() =>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function lazyWithRetry<T extends React.ComponentType<any>>(
+  loader: () => Promise<{ default: T }>,
+  retries = 2
+): React.LazyExoticComponent<T> {
+  return lazy(async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await loader();
+      } catch (err) {
+        lastError = err;
+        if (attempt < retries) {
+          await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError;
+  });
+}
+
+const PaperHistoryModal = lazyWithRetry(() =>
   import('./components/PaperHistoryModal').then((m) => ({ default: m.PaperHistoryModal }))
 );
-const QuotaAndModelModal = lazy(() =>
+const QuotaAndModelModal = lazyWithRetry(() =>
   import('./components/QuotaAndModelModal').then((m) => ({ default: m.QuotaAndModelModal }))
 );
-const AcademicExportModal = lazy(() =>
+const AcademicExportModal = lazyWithRetry(() =>
   import('./components/AcademicExportModal').then((m) => ({ default: m.AcademicExportModal }))
 );
 import {
@@ -100,7 +110,6 @@ import {
   ArrowRight,
   BookOpen,
   FileText,
-  SlidersHorizontal,
   History,
   Activity,
 } from 'lucide-react';
@@ -211,7 +220,6 @@ export default function App() {
   const [savedPapersArchive, setSavedPapersArchive] = useState<ArchivedPaperEntry[]>(
     saved?.savedPapersArchive ?? []
   );
-  const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [historyModalOpen, setHistoryModalOpen] = useState<boolean>(false);
   const [toastBanner, setToastBanner] = useState<string | null>(null);
 
@@ -274,10 +282,24 @@ export default function App() {
     savedPapersArchive,
   ]);
 
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
   const showToast = (msg: string) => {
     setToastBanner(msg);
-    setTimeout(() => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = setTimeout(() => {
       setToastBanner((prev) => (prev === msg ? null : prev));
+      toastTimerRef.current = null;
     }, 5500);
   };
 
@@ -1131,19 +1153,19 @@ export default function App() {
               </button>
             </nav>
 
-            {/* Zone 3: Quota & Model Switcher, History Archive, Settings & Primary Export Action */}
+            {/* Zone 3: Unified AI Model/Quota/Settings Center, History Archive & Primary Export Action */}
             <div className="shrink-0 flex items-center gap-1.5 sm:gap-2">
               <button
                 type="button"
                 data-testid="open-quota-model-modal"
                 onClick={() => setQuotaModalOpen(true)}
-                aria-label={`打开 AI 额度监控与模型选择（当前模型 ${GEMINI_MODEL_PROFILES[preferredGeminiModel].shortName}，今日 RPD ${activeOfficialQuota.todayRequests}/${activeOfficialQuota.limits.rpd}）`}
+                aria-label={`打开 AI 模型、配额与批注设置中心（当前模型 ${GEMINI_MODEL_PROFILES[preferredGeminiModel].shortName}，今日 RPD ${activeOfficialQuota.todayRequests}/${activeOfficialQuota.limits.rpd}，批注详略 Lv.${annotationDetailLevel}）`}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Activity className="w-3.5 h-3.5 text-blue-600" />
                 <span>{GEMINI_MODEL_PROFILES[preferredGeminiModel].shortName}</span>
                 <span className="hidden lg:inline font-mono-tabular text-[11px] text-slate-500">
-                  · {activeOfficialQuota.todayRequests}/{activeOfficialQuota.limits.rpd.toLocaleString()} RPD
+                  · {activeOfficialQuota.todayRequests}/{activeOfficialQuota.limits.rpd.toLocaleString()} RPD · Lv.{annotationDetailLevel}
                 </span>
               </button>
               <button
@@ -1156,18 +1178,6 @@ export default function App() {
                 <span className="hidden sm:inline">历史论文</span>
                 <span className="font-mono-tabular text-[11px] text-slate-600">
                   ({savedPapersArchive.length})
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setSettingsModalOpen(true)}
-                aria-label={`打开全局设置（当前批注详细程度 Lv.${annotationDetailLevel}）`}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <SlidersHorizontal className="w-3.5 h-3.5 text-blue-600" />
-                <span>设置</span>
-                <span className="hidden lg:inline font-mono-tabular text-[11px] text-slate-500">
-                  Lv.{annotationDetailLevel}
                 </span>
               </button>
               <button
@@ -1235,40 +1245,32 @@ export default function App() {
               onAutoRepairAndReset={handleAutoRepairWorkspaceState}
               onExportBackup={handleDownloadMarkdownFile}
             >
-              <Suspense
-                fallback={
-                  <div className="bg-white border border-slate-200 rounded-lg p-12 text-center text-xs font-mono-tabular text-slate-500">
-                    正在加载论文预分析与缺口评估工作台...
-                  </div>
-                }
-              >
-                <PreAnalysisStageView
-                  materials={materials}
-                  knowledgeNodes={knowledgeNodes}
-                  currentPreAnalysis={currentPreAnalysis}
-                  paperTitleEn={paperTitleEn}
-                  paperAuthors={paperAuthors}
-                  paperArxivId={paperArxivId}
-                  paperRawText={paperRawText}
-                  onChangePaperTitle={setPaperTitleEn}
-                  onChangePaperAuthors={setPaperAuthors}
-                  onChangePaperArxivId={setPaperArxivId}
-                  onChangePaperRawText={setPaperRawText}
-                  isPreAnalysisConfirmed={isPreAnalysisConfirmed}
-                  isTranslatingFull={isTranslatingFull}
-                  translationProgress={translationProgress}
-                  translationError={translationError}
-                  onPreAnalysisGenerated={handlePreAnalysisGenerated}
-                  onConfirmAndTranslate={handleConfirmAndTranslate}
-                  onBackToKnowledgeStage={() => setActiveTab('knowledge')}
-                  annotationDetailLevel={annotationDetailLevel}
-                  onOpenSettings={() => setSettingsModalOpen(true)}
-                  inProgressTranslation={inProgressTranslation}
-                  onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
-                  hasPartialTranslatedDocument={Boolean(currentDocument)}
-                  onSwitchToTranslationTab={() => setActiveTab('translation')}
-                />
-              </Suspense>
+              <PreAnalysisStageView
+                materials={materials}
+                knowledgeNodes={knowledgeNodes}
+                currentPreAnalysis={currentPreAnalysis}
+                paperTitleEn={paperTitleEn}
+                paperAuthors={paperAuthors}
+                paperArxivId={paperArxivId}
+                paperRawText={paperRawText}
+                onChangePaperTitle={setPaperTitleEn}
+                onChangePaperAuthors={setPaperAuthors}
+                onChangePaperArxivId={setPaperArxivId}
+                onChangePaperRawText={setPaperRawText}
+                isPreAnalysisConfirmed={isPreAnalysisConfirmed}
+                isTranslatingFull={isTranslatingFull}
+                translationProgress={translationProgress}
+                translationError={translationError}
+                onPreAnalysisGenerated={handlePreAnalysisGenerated}
+                onConfirmAndTranslate={handleConfirmAndTranslate}
+                onBackToKnowledgeStage={() => setActiveTab('knowledge')}
+                annotationDetailLevel={annotationDetailLevel}
+                onOpenSettings={() => setQuotaModalOpen(true)}
+                inProgressTranslation={inProgressTranslation}
+                onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
+                hasPartialTranslatedDocument={Boolean(currentDocument)}
+                onSwitchToTranslationTab={() => setActiveTab('translation')}
+              />
             </ErrorBoundary>
           )}
 
@@ -1325,45 +1327,37 @@ export default function App() {
                     </div>
                   </section>
                 ) : (
-                  <Suspense
-                    fallback={
-                      <div className="bg-white border border-slate-200 rounded-lg p-12 text-center text-xs font-mono-tabular text-slate-500">
-                        正在加载双栏深度翻译与精准批注文稿视图...
-                      </div>
+                  <TranslationDocumentView
+                    document={currentDocument}
+                    knowledgeNodes={knowledgeNodes}
+                    materials={materials}
+                    persistedChatTurns={paperChatHistory[currentDocument.paperId]}
+                    onChatTurnsChange={(paperId, turns) =>
+                      setPaperChatHistory((prev) => upsertPaperChatTurns(prev, paperId, turns))
                     }
-                  >
-                    <TranslationDocumentView
-                      document={currentDocument}
-                      knowledgeNodes={knowledgeNodes}
-                      materials={materials}
-                      persistedChatTurns={paperChatHistory[currentDocument.paperId]}
-                      onChatTurnsChange={(paperId, turns) =>
-                        setPaperChatHistory((prev) => upsertPaperChatTurns(prev, paperId, turns))
-                      }
-                      persistedActiveParagraphId={activeParagraphByPaperId[currentDocument.paperId]}
-                      onActiveParagraphChange={(paperId, paragraphId) =>
-                        setActiveParagraphByPaperId((prev) =>
-                          prev[paperId] === paragraphId ? prev : { ...prev, [paperId]: paragraphId }
-                        )
-                      }
-                      persistedMindMaps={derivationMindMapsByPaperId[currentDocument.paperId]}
-                      onMindMapsChange={(paperId, maps) =>
-                        setDerivationMindMapsByPaperId((prev) => ({ ...prev, [paperId]: maps }))
-                      }
-                      onDynamicFeedback={handleDynamicFeedback}
-                      onAppendAnnotation={handleAppendAnnotationToParagraph}
-                      onExportDocument={() => setExportModalOpen(true)}
-                      annotationDetailLevel={annotationDetailLevel}
-                      manuscriptWidthPercent={manuscriptWidthPercent}
-                      onManuscriptWidthPercentChange={setManuscriptWidthPercent}
-                      onOpenSettings={() => setSettingsModalOpen(true)}
-                      onRetryDegradedSections={handleRetryDegradedSections}
-                      retryingChunkIndices={retryingChunkIndices}
-                      isTranslatingFull={isTranslatingFull}
-                      inProgressTranslation={inProgressTranslation}
-                      onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
-                    />
-                  </Suspense>
+                    persistedActiveParagraphId={activeParagraphByPaperId[currentDocument.paperId]}
+                    onActiveParagraphChange={(paperId, paragraphId) =>
+                      setActiveParagraphByPaperId((prev) =>
+                        prev[paperId] === paragraphId ? prev : { ...prev, [paperId]: paragraphId }
+                      )
+                    }
+                    persistedMindMaps={derivationMindMapsByPaperId[currentDocument.paperId]}
+                    onMindMapsChange={(paperId, maps) =>
+                      setDerivationMindMapsByPaperId((prev) => ({ ...prev, [paperId]: maps }))
+                    }
+                    onDynamicFeedback={handleDynamicFeedback}
+                    onAppendAnnotation={handleAppendAnnotationToParagraph}
+                    onExportDocument={() => setExportModalOpen(true)}
+                    annotationDetailLevel={annotationDetailLevel}
+                    manuscriptWidthPercent={manuscriptWidthPercent}
+                    onManuscriptWidthPercentChange={setManuscriptWidthPercent}
+                    onOpenSettings={() => setQuotaModalOpen(true)}
+                    onRetryDegradedSections={handleRetryDegradedSections}
+                    retryingChunkIndices={retryingChunkIndices}
+                    isTranslatingFull={isTranslatingFull}
+                    inProgressTranslation={inProgressTranslation}
+                    onResumeIncompleteTranslation={handleResumeIncompleteTranslation}
+                  />
                 )}
               </div>
             </ErrorBoundary>
@@ -1401,19 +1395,11 @@ export default function App() {
                     </div>
                   </section>
                 ) : (
-                  <Suspense
-                    fallback={
-                      <div className="bg-white border border-slate-200 rounded-lg p-12 text-center text-xs font-mono-tabular text-slate-500">
-                        正在加载专业术语统一表与联网文献核验视图...
-                      </div>
-                    }
-                  >
-                    <TerminologyAndVerificationView
-                      document={currentDocument}
-                      feedbackHistory={feedbackHistory}
-                      knowledgeNodes={knowledgeNodes}
-                    />
-                  </Suspense>
+                  <TerminologyAndVerificationView
+                    document={currentDocument}
+                    feedbackHistory={feedbackHistory}
+                    knowledgeNodes={knowledgeNodes}
+                  />
                 )}
               </div>
             </ErrorBoundary>
@@ -1448,19 +1434,6 @@ export default function App() {
         </Suspense>
       )}
 
-      {/* Global Settings Modal */}
-      <SettingsModal
-        isOpen={settingsModalOpen}
-        annotationDetailLevel={annotationDetailLevel}
-        onChangeAnnotationDetailLevel={(nextLevel) => {
-          setAnnotationDetailLevel(nextLevel);
-        }}
-        onClose={() => setSettingsModalOpen(false)}
-        hasActivePaperForRegen={Boolean(currentPreAnalysis && paperRawText.trim())}
-        isTranslatingFull={isTranslatingFull}
-        onRegenerateWithNewLevel={handleConfirmAndTranslate}
-      />
-
       {/* Multi-Paper History Archive Modal */}
       {historyModalOpen && (
         <Suspense fallback={null}>
@@ -1478,7 +1451,7 @@ export default function App() {
         </Suspense>
       )}
 
-      {/* AI Quota Real-Time Monitor & Gemini Model Selector Modal */}
+      {/* Unified AI Quota Real-Time Monitor, Gemini Model Selector & Annotation Detail Settings Modal */}
       {quotaModalOpen && (
         <Suspense fallback={null}>
           <QuotaAndModelModal
@@ -1515,6 +1488,13 @@ export default function App() {
               setDailyTokenBudget(nextBudget);
               showToast(`● 已更新每日 Token 预算上限为 ${nextBudget.toLocaleString()} Tokens`);
             }}
+            annotationDetailLevel={annotationDetailLevel}
+            onChangeAnnotationDetailLevel={(nextLevel) => {
+              setAnnotationDetailLevel(nextLevel);
+            }}
+            hasActivePaperForRegen={Boolean(currentPreAnalysis && paperRawText.trim())}
+            isTranslatingFull={isTranslatingFull}
+            onRegenerateWithNewLevel={handleConfirmAndTranslate}
             usageEntries={usageEntries}
             onClearUsageEntries={() => {
               clearStoredUsageLedger();

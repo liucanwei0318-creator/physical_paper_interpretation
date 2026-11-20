@@ -31,12 +31,42 @@ export type GenerationErrorCode =
 
 export type SelectableGeminiModel =
   | 'gemini-4-hydrogen'
+  | 'gemini-4-neon'
+  | 'gemini-4-carbon'
   | 'gemini-4-argon'
   | 'gemini-3.1-flash-lite';
 
 export type ModelRoutingMode = 'cascade' | 'strict';
 
 export type GeminiAccountTier = 'free' | 'tier1';
+
+export type ModelConnectivityStatus =
+  | 'available'
+  | 'paid_or_quota_429'
+  | 'auth_error'
+  | 'not_found'
+  | 'timeout'
+  | 'missing_key'
+  | 'error';
+
+export interface ModelConnectivityProbeResult {
+  model: SelectableGeminiModel;
+  ok: boolean;
+  status: ModelConnectivityStatus;
+  statusLabelZh: string;
+  detailZh: string;
+  latencyMs: number;
+  httpStatus?: number;
+  modelVersion?: string;
+}
+
+export interface ModelConnectivityProbeResponse {
+  ok: boolean;
+  hasGeminiKey: boolean;
+  checkedAt: string;
+  timeoutMs: number;
+  results: ModelConnectivityProbeResult[];
+}
 
 export interface GenerationMeta {
   degraded: boolean;

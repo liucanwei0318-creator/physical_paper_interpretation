@@ -12,6 +12,7 @@ import { parseArxivAtomXml } from '../utils/arxivParser';
 import { MixedAcademicText } from './LatexRenderer';
 import { DiagnosticAlert } from './DiagnosticAlert';
 import { apiFetch } from '../utils/quotaTracker';
+import { sanitizeExternalUrl } from '../utils/urlSafety';
 import {
   Search,
   RefreshCw,
@@ -23,9 +24,6 @@ import {
   Upload,
   AlertCircle,
   SlidersHorizontal,
-  Sparkles,
-  Send,
-  MessageSquare,
 } from 'lucide-react';
 
 interface PreAnalysisStageViewProps {
@@ -91,14 +89,6 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
   const [isRunningPreAnalysis, setIsRunningPreAnalysis] = useState(false);
   const [preAnalysisError, setPreAnalysisError] = useState('');
 
-  // Interactive Pre-Analysis Reading Guide Q&A Assistant state
-  const [guideQuestion, setGuideQuestion] = useState('');
-  const [isAskingGuide, setIsAskingGuide] = useState(false);
-  const [guideError, setGuideError] = useState('');
-  const [guideTurns, setGuideTurns] = useState<
-    Array<{ id: string; question: string; answer: string }>
-  >([]);
-
   // PDF upload & preview state
   const [isParsingPdf, setIsParsingPdf] = useState(false);
   const [pdfWarning, setPdfWarning] = useState('');
@@ -106,68 +96,6 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
   const [uploadedPdfPageCount, setUploadedPdfPageCount] = useState<number | null>(null);
   const [uploadedPdfObjectUrl, setUploadedPdfObjectUrl] = useState<string | null>(null);
   const [showOriginalPdfPreview, setShowOriginalPdfPreview] = useState(false);
-
-  const handleAskPreAnalysisGuide = async (customQuestion?: string) => {
-    if (!currentPreAnalysis || isAskingGuide) return;
-    const q = (customQuestion ?? guideQuestion).trim();
-    if (!q) return;
-
-    setGuideError('');
-    setIsAskingGuide(true);
-    try {
-      const resp = await apiFetch('/api/paper-chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userMessage: q,
-          chatHistory: guideTurns.slice(-4).flatMap((t) => [
-            { role: 'user', content: t.question, locationLabel: '预分析导读' },
-            { role: 'assistant', content: t.answer, locationLabel: '预分析导读' },
-          ]),
-          activeLocation: {
-            sectionNumber: '0',
-            sectionTitleZh: '预分析与全文导读路线',
-            sectionTitleEn: 'Pre-Analysis & Reading Guide',
-            paragraphId: 'pre-analysis-guide',
-            paragraphIndex: 1,
-            statementType: '核心结论',
-            translatedZhText: currentPreAnalysis.coreInnovationSummary,
-            originalEnExcerpt: paperRawText.slice(0, 900),
-            equations: [],
-          },
-          documentContext: {
-            titleZh: currentPreAnalysis.titleZh,
-            titleEn: currentPreAnalysis.titleEn,
-            authors: currentPreAnalysis.authors,
-            abstractZh: currentPreAnalysis.coreInnovationSummary,
-            allSectionTitles: (currentPreAnalysis.sectionGaps || []).map(
-              (s) => `${s.sectionNumber} ${s.sectionTitleZh} (${s.sectionTitleEn})`
-            ),
-          },
-          knowledgeNodes,
-          materials,
-          annotationDetailLevel,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || 'Gemini 导读助手响应失败');
-      }
-      setGuideTurns((prev) => [
-        ...prev,
-        {
-          id: `guide-${Date.now()}`,
-          question: q,
-          answer: data.replyMarkdown || '已完成针对该论文导读问题的分析。',
-        },
-      ]);
-      if (!customQuestion) setGuideQuestion('');
-    } catch (err) {
-      setGuideError(err instanceof Error ? err.message : '导读助手请求异常，请稍后重试');
-    } finally {
-      setIsAskingGuide(false);
-    }
-  };
 
   const runArxivFetch = async () => {
     const cleanInput = arxivSearchInput.trim();
@@ -214,7 +142,11 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
       const directUrl = cleanIdMatch
         ? `https://export.arxiv.org/api/query?id_list=${encodeURIComponent(cleanIdMatch[1])}`
         : `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(cleanInput)}&start=0&max_results=1`;
-      const directResp = await fetch(directUrl);
+      const directResp = await fetch(directUrl, {
+        signal: typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+          ? AbortSignal.timeout(10000)
+          : undefined,
+      });
       if (directResp.ok) {
         const xmlText = await directResp.text();
         const parsedPapers = parseArxivAtomXml(xmlText, { limit: 1 });
@@ -857,134 +789,37 @@ export const PreAnalysisStageView: React.FC<PreAnalysisStageViewProps> = ({
             </div>
           </div>
 
-          {/* Interactive Pre-Analysis Gemini Reading Guide Assistant */}
-          <div className="pt-4 border-t border-slate-200 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
-                <h3 className="text-sm font-bold text-slate-900">
-                  四、Gemini 导读助手（读前答疑、缺口探查与精读路线规划）
-                </h3>
-              </div>
-              <span className="text-xs font-mono-tabular text-slate-500">
-                可在开始全文翻译前向导读助手追问核心物理图像、章节取舍与前置数学准备
-              </span>
-            </div>
-
-            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs text-slate-500 font-medium">一键向导读助手提问：</span>
-                {[
-                  '这篇论文最核心的物理突破与物理图像是什么？',
-                  '结合我的 K1–K4 知识背景，建议我按什么顺序精读各章节？',
-                  '哪些 K3 数学前置工具需要我在读正文推导前优先补齐？',
-                ].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    disabled={isAskingGuide}
-                    onClick={() => handleAskPreAnalysisGuide(preset)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-blue-50 text-slate-700 hover:text-blue-700 border border-slate-200 rounded text-xs font-medium transition-colors cursor-pointer"
-                  >
-                    <MessageSquare className="w-3 h-3 text-blue-600 shrink-0" />
-                    <span>{preset}</span>
-                  </button>
-                ))}
-              </div>
-
-              {guideTurns.length > 0 && (
-                <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
-                  {guideTurns.map((turn) => (
-                    <div
-                      key={turn.id}
-                      className="p-3.5 bg-white border border-slate-200 rounded-md space-y-2 text-xs sm:text-sm"
-                    >
-                      <div className="font-semibold text-blue-900 flex items-center gap-1.5">
-                        <span>您的导读提问：</span>
-                        <span>{turn.question}</span>
-                      </div>
-                      <div className="text-slate-800 leading-relaxed whitespace-pre-line pt-1 border-t border-slate-100">
-                        <MixedAcademicText text={turn.answer} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {isAskingGuide && (
-                <div className="p-3 bg-white border border-slate-200 rounded-md text-xs text-slate-600 flex items-center gap-2">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
-                  <span>Gemini 导读助手正在结合《{currentPreAnalysis.titleZh}》与您的知识模型生成导读解答...</span>
-                </div>
-              )}
-
-              {guideError && (
-                <DiagnosticAlert
-                  variant="error"
-                  title="Gemini 导读助手响应异常"
-                  message={guideError}
-                  retryLabel="重试提问"
-                  isRetrying={isAskingGuide}
-                  onRetry={() => handleAskPreAnalysisGuide(guideQuestion || '请概述本文的核心导读路线')}
-                />
-              )}
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleAskPreAnalysisGuide();
-                }}
-                className="flex gap-2"
-              >
-                <label htmlFor="pre-analysis-guide-input" className="sr-only">
-                  向 Gemini 预分析导读助手提问
-                </label>
-                <input
-                  id="pre-analysis-guide-input"
-                  type="text"
-                  value={guideQuestion}
-                  onChange={(e) => setGuideQuestion(e.target.value)}
-                  placeholder={`针对《${currentPreAnalysis.titleZh}》的导读路线、数学工具或物理背景随时提问...`}
-                  className="flex-1 px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600"
-                />
-                <button
-                  type="submit"
-                  disabled={isAskingGuide || !guideQuestion.trim()}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>询问导读助手</span>
-                </button>
-              </form>
-            </div>
-          </div>
-
           {(currentPreAnalysis.groundingSources || []).length > 0 && (
             <div className="pt-4 border-t border-slate-200 space-y-2">
               <div className="text-xs font-mono-tabular text-slate-500">
                 本论文预分析联网核验的权威文献源：
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {(currentPreAnalysis.groundingSources || []).map((src, idx) => (
-                  <div
-                    key={idx}
-                    className="p-3 bg-slate-50 border border-slate-200 rounded text-xs flex items-start justify-between gap-3"
-                  >
-                    <div className="space-y-0.5">
-                      <div className="font-semibold text-slate-900">{src.title}</div>
-                      {src.snippet && <div className="text-slate-600 line-clamp-2">{src.snippet}</div>}
-                    </div>
-                    <a
-                      href={src.uri}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-blue-600 hover:underline shrink-0"
+                {(currentPreAnalysis.groundingSources || []).map((src, idx) => {
+                  const safeHref = sanitizeExternalUrl(src.uri);
+                  return (
+                    <div
+                      key={idx}
+                      className="p-3 bg-slate-50 border border-slate-200 rounded text-xs flex items-start justify-between gap-3"
                     >
-                      <span>链接</span>
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-                  </div>
-                ))}
+                      <div className="space-y-0.5">
+                        <div className="font-semibold text-slate-900">{src.title}</div>
+                        {src.snippet && <div className="text-slate-600 line-clamp-2">{src.snippet}</div>}
+                      </div>
+                      {safeHref && (
+                        <a
+                          href={safeHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-blue-600 hover:underline shrink-0"
+                        >
+                          <span>链接</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

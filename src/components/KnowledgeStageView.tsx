@@ -23,8 +23,6 @@ import {
   CheckCircle2,
   RefreshCw,
   ExternalLink,
-  BookOpen,
-  FileText,
   Sparkles,
   RotateCcw,
   ChevronDown,
@@ -32,6 +30,7 @@ import {
 } from 'lucide-react';
 import { DiagnosticAlert } from './DiagnosticAlert';
 import { apiFetch } from '../utils/quotaTracker';
+import { sanitizeExternalUrl } from '../utils/urlSafety';
 
 interface KnowledgeStageViewProps {
   materials: ReadingMaterial[];
@@ -101,7 +100,8 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
   const [customFormula, setCustomFormula] = useState('');
   const [customRationale, setCustomRationale] = useState('');
 
-  // Live internet search & verification state
+  // Live internet search & verification state (integrated inside material entry card)
+  const [showInlineSearch, setShowInlineSearch] = useState(false);
   const [webQuery, setWebQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'textbook' | 'paper' | 'concept'>('textbook');
   const [isSearchingWeb, setIsSearchingWeb] = useState(false);
@@ -450,23 +450,20 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
   };
 
   return (
-    <div className="space-y-8">
-      {/* Stage 1 Header & Progress Status */}
-      <section className="bg-white border border-slate-200 rounded-lg p-6">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 pb-6 border-b border-slate-200">
-          <div className="space-y-2 max-w-3xl">
-            <div className="text-xs font-mono-tabular text-slate-500">
-              第一阶段（工作流第 1–2 步）· 接收您的阅读书目与论文材料并建立个人知识模型
-            </div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+    <div className="space-y-6">
+      {/* Stage 1 Header & Compact Single-Line Epistemic Metrics Strip */}
+      <section className="bg-white border border-slate-200 rounded-lg px-6 py-4 space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div className="space-y-1 max-w-2xl">
+            <h1 className="text-xl font-bold tracking-tight text-slate-900">
               个人知识背景建模工作台
             </h1>
-            <p className="text-sm text-slate-600 leading-relaxed">
-              请在下方录入您<strong className="font-semibold text-slate-900">已经阅读过的教材、专著或前置论文及其具体版本、章节范围</strong>。系统内置章节级范围解析器与互联网学术目录检索，能够精确识别「第1–7章」「前四章」「跳过第5章」「第6章略读」等任意表达，并提供逐章可视化校准。
+            <p className="text-xs text-slate-600">
+              录入已读教材、专著或前置论文的具体章节范围（支持「第1–7章」「前四章」「跳过第5章」等），系统逐章校准 K1–K3 掌握边界。
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             {(materials.length > 0 || knowledgeNodes.length > 0) && (
               <button
                 type="button"
@@ -482,16 +479,16 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
               type="button"
               onClick={onGenerateReport}
               disabled={materials.length === 0 || isGeneratingReport}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {isGeneratingReport ? (
                 <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>正在生成《个人知识背景分析报告》...</span>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>正在生成报告...</span>
                 </>
               ) : (
                 <>
-                  <Sparkles className="w-4 h-4" />
+                  <Sparkles className="w-3.5 h-3.5" />
                   <span>
                     {report
                       ? '重新生成《个人知识背景分析报告》'
@@ -505,218 +502,177 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
               type="button"
               onClick={onProceedToPreAnalysis}
               disabled={materials.length === 0}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <span>下一步：导入待译英文论文</span>
-              <ArrowRight className="w-4 h-4" />
+              <span>下一步：导入待译论文</span>
+              <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
 
-        {/* 4-Column Quantitative Epistemic Metrics */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 pt-6">
-          <div>
-            <div className="text-xs font-mono-tabular text-slate-500">
-              K1 基础知识 · 免除冗余批注
-            </div>
-            <div className="mt-1 flex items-baseline">
-              <span className="text-2xl font-bold font-mono-tabular text-slate-900">
-                {metrics.levelCounts.K1}
-              </span>
-              <span className="text-xs font-mono-tabular text-slate-500 ml-1.5">
-                项已掌握概念
-              </span>
-            </div>
-            <div className="mt-1 text-xs text-slate-500">
-              已学习知识：{metrics.epistemicBreakdown.explicitMasteredCount} 项
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs font-mono-tabular text-slate-500">
-              K2 相关知识 · 仅在障碍处点拨
-            </div>
-            <div className="mt-1 flex items-baseline">
-              <span className="text-2xl font-bold font-mono-tabular text-slate-900">
-                {metrics.levelCounts.K2}
-              </span>
-              <span className="text-xs font-mono-tabular text-slate-500 ml-1.5">
-                项接触过概念
-              </span>
-            </div>
-            <div className="mt-1 text-xs text-slate-500">
-              推测掌握知识：{metrics.epistemicBreakdown.inferredCount} 项
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs font-mono-tabular text-slate-500">
-              K3 陌生知识 · 必须补充前置与机制
-            </div>
-            <div className="mt-1 flex items-baseline">
-              <span className="text-2xl font-bold font-mono-tabular text-amber-700">
-                {metrics.levelCounts.K3}
-              </span>
-              <span className="text-xs font-mono-tabular text-slate-500 ml-1.5">
-                项未读/陌生缺口
-              </span>
-            </div>
-            <div className="mt-1 text-xs text-slate-500">
-              未知知识：{metrics.epistemicBreakdown.unknownCount} 项
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs font-mono-tabular text-slate-500">
-              已有材料 · 您已录入的书籍/论文
-            </div>
-            <div className="mt-1 flex items-baseline">
-              <span className="text-2xl font-bold font-mono-tabular text-blue-700">
-                {metrics.epistemicBreakdown.providedMaterialsCount}
-              </span>
-              <span className="text-xs font-mono-tabular text-slate-500 ml-1.5">
-                部学习材料
-              </span>
-            </div>
-            <div className="mt-1 text-xs text-slate-500">
-              分析报告状态：{report ? '● 已生成' : '○ 待生成'}
-            </div>
-          </div>
+        {/* Single-Line Compact Epistemic Metrics Ribbon */}
+        <div
+          data-testid="stage1-compact-metrics"
+          className="pt-3 border-t border-slate-100 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs font-mono-tabular text-slate-600"
+        >
+          <span>
+            <strong className="text-slate-900">K1 已掌握</strong> {metrics.levelCounts.K1} 项
+          </span>
+          <span aria-hidden="true" className="text-slate-300">·</span>
+          <span>
+            <strong className="text-slate-900">K2 半熟</strong> {metrics.levelCounts.K2} 项
+          </span>
+          <span aria-hidden="true" className="text-slate-300">·</span>
+          <span>
+            <strong className="text-amber-700">K3 陌生缺口</strong> {metrics.levelCounts.K3} 项
+          </span>
+          <span aria-hidden="true" className="text-slate-300">·</span>
+          <span>
+            <strong className="text-blue-700">已录材料</strong> {metrics.epistemicBreakdown.providedMaterialsCount} 部
+          </span>
+          <span aria-hidden="true" className="text-slate-300">·</span>
+          <span>
+            报告状态：{report ? <span className="text-emerald-700 font-semibold">● 已生成</span> : '○ 待生成'}
+          </span>
         </div>
       </section>
 
       {/* Main Two-Column Workbench */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Left Column (5 cols): Live Web Search + Material Input Form with Real-Time Scope Preview */}
-        <div className="lg:col-span-5 space-y-6">
-          {/* 1. Live Internet Search & Academic Verification Card */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Left Column (5 cols): Unified Material Entry Form + Integrated Web Search */}
+        <div className="lg:col-span-5">
           <section className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
-            <div className="space-y-1">
-              <h2 className="text-base font-semibold text-slate-900">
-                互联网实时检索教材、版本目录与 arXiv 文献
-              </h2>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                输入任意理论物理教材名、作者、DOI 或 arXiv 编号，系统将实时检索 OpenLibrary、CrossRef 与 arXiv，并支持一键填入下方录入表单。
-              </p>
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1">
+                <h2 className="text-base font-semibold text-slate-900">
+                  录入您已阅读过的书籍、教材或论文
+                </h2>
+                <p className="text-xs text-slate-500">
+                  支持「第1-7章和第9章」「前四章」「跳过第3章」等表达，并在下方实时预览逐章映射。
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="toggle-inline-web-search"
+                onClick={() => setShowInlineSearch((prev) => !prev)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  showInlineSearch
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                }`}
+              >
+                <Search className="w-3 h-3" />
+                <span>{showInlineSearch ? '收起联网检索' : '联网检索填表'}</span>
+              </button>
             </div>
 
-            <form onSubmit={handleWebSearch} className="space-y-3">
-              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md">
-                {(
-                  [
-                    { id: 'textbook', label: '检索教材版本与目录' },
-                    { id: 'paper', label: '检索 arXiv / DOI 论文' },
-                    { id: 'concept', label: '检索理论物理概念' },
-                  ] as const
-                ).map((tab) => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setSearchMode(tab.id)}
-                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      searchMode === tab.id
-                        ? 'bg-white text-slate-900 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="flex gap-2">
-                <label htmlFor="live-web-search-input" className="sr-only">
-                  输入检索关键词
-                </label>
-                <input
-                  id="live-web-search-input"
-                  type="text"
-                  value={webQuery}
-                  onChange={(e) => setWebQuery(e.target.value)}
-                  placeholder="输入书名/作者/arXiv号，如：Peskin Quantum Field Theory 或 Sakurai"
-                  className="flex-1 px-3 py-2 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600"
-                />
-                <button
-                  type="submit"
-                  disabled={isSearchingWeb}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  {isSearchingWeb ? (
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Search className="w-3.5 h-3.5" />
-                  )}
-                  <span>{isSearchingWeb ? '检索中...' : '联网检索'}</span>
-                </button>
-              </div>
-            </form>
-
-            {webSearchError && (
-              <div className="p-3 bg-rose-50 border border-rose-200 rounded-md text-xs text-rose-700">
-                {webSearchError}
-              </div>
-            )}
-
-            {webSearchResult && (
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-3">
-                <div className="text-xs font-semibold text-slate-900">
-                  「{webSearchResult.query}」互联网实时检索结果：
-                </div>
-                <div className="text-xs text-slate-700 leading-relaxed whitespace-pre-line">
-                  <MixedAcademicText text={webSearchResult.synthesis} />
-                </div>
-                {webSearchResult.sources.length > 0 && (
-                  <div className="pt-2 border-t border-slate-200 space-y-2">
-                    <div className="text-xs font-mono-tabular text-slate-500">
-                      检索到的文献源（点击「填入表单」可直接导入下方）：
-                    </div>
-                    {webSearchResult.sources.slice(0, 5).map((src, i) => (
-                      <div
-                        key={i}
-                        className="p-2.5 bg-white border border-slate-200 rounded text-xs flex items-center justify-between gap-2"
+            {showInlineSearch && (
+              <div
+                data-testid="inline-web-search-panel"
+                className="p-3.5 bg-slate-50 border border-slate-200 rounded-md space-y-3"
+              >
+                <form onSubmit={handleWebSearch} className="space-y-2.5">
+                  <div className="flex items-center gap-1 p-1 bg-white border border-slate-200 rounded-md">
+                    {(
+                      [
+                        { id: 'textbook', label: '教材目录' },
+                        { id: 'paper', label: 'arXiv / DOI' },
+                        { id: 'concept', label: '物理概念' },
+                      ] as const
+                    ).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setSearchMode(tab.id)}
+                        className={`flex-1 py-1 px-2 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          searchMode === tab.id
+                            ? 'bg-slate-900 text-white'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
                       >
-                        <div className="min-w-0 flex-1">
-                          <div className="font-medium text-slate-900 truncate">{src.title}</div>
-                          <div className="text-slate-500 font-mono-tabular truncate">
-                            [{src.sourceType}] {src.snippet || src.uri}
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex gap-2">
+                    <label htmlFor="live-web-search-input" className="sr-only">
+                      输入检索关键词
+                    </label>
+                    <input
+                      id="live-web-search-input"
+                      type="text"
+                      value={webQuery}
+                      onChange={(e) => setWebQuery(e.target.value)}
+                      placeholder="书名 / 作者 / arXiv号，如：Peskin QFT"
+                      className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isSearchingWeb}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      {isSearchingWeb ? (
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Search className="w-3 h-3" />
+                      )}
+                      <span>{isSearchingWeb ? '检索中...' : '检索'}</span>
+                    </button>
+                  </div>
+                </form>
+
+                {webSearchError && (
+                  <div className="p-2.5 bg-rose-50 border border-rose-200 rounded text-xs text-rose-700">
+                    {webSearchError}
+                  </div>
+                )}
+
+                {webSearchResult && (
+                  <div className="space-y-2 pt-1 border-t border-slate-200 text-xs">
+                    <div className="text-slate-700 leading-relaxed whitespace-pre-line">
+                      <MixedAcademicText text={webSearchResult.synthesis} />
+                    </div>
+                    {webSearchResult.sources.slice(0, 4).map((src, i) => {
+                      const safeHref = sanitizeExternalUrl(src.uri);
+                      return (
+                        <div
+                          key={i}
+                          className="p-2 bg-white border border-slate-200 rounded flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="font-medium text-slate-900 truncate">{src.title}</div>
+                            <div className="text-[11px] text-slate-500 font-mono-tabular truncate">
+                              [{src.sourceType}] {src.snippet || src.uri}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleUseSourceInForm(src)}
+                              className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 text-[11px] font-medium rounded transition-colors whitespace-nowrap cursor-pointer"
+                            >
+                              填入表单
+                            </button>
+                            {safeHref && (
+                              <a
+                                href={safeHref}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                aria-label={`打开外部链接 ${src.title}`}
+                                className="text-slate-400 hover:text-slate-700"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                              </a>
+                            )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => handleUseSourceInForm(src)}
-                            className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 font-medium rounded transition-colors whitespace-nowrap cursor-pointer"
-                          >
-                            填入表单
-                          </button>
-                          <a
-                            href={src.uri}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            aria-label={`打开外部链接 ${src.title}`}
-                            className="text-slate-400 hover:text-slate-700"
-                          >
-                            <ExternalLink className="w-3.5 h-3.5" />
-                          </a>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
             )}
-          </section>
-
-          {/* 2. Input Form for User's Read Books / Textbooks / Papers */}
-          <section className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
-            <div className="space-y-1">
-              <h2 className="text-base font-semibold text-slate-900">
-                录入您已阅读过的书籍、教材或论文
-              </h2>
-              <p className="text-xs text-slate-500">
-                支持识别任意章节与主题表达（如「第1-7章和第9章」「前四章」「跳过第3章，第6章略读」），并在下方实时预览章节识别结果。
-              </p>
-            </div>
 
             <form onSubmit={handleAddMaterialSubmit} className="space-y-3.5">
               <div>
@@ -736,7 +692,7 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
                       ) : (
                         <Search className="w-3 h-3" />
                       )}
-                      <span>{isFetchingToc ? '正在检索真实目录...' : '联网获取本书真实章节目录'}</span>
+                      <span>{isFetchingToc ? '正在检索真实目录...' : '联网获取真实章节目录'}</span>
                     </button>
                   )}
                 </div>
@@ -988,61 +944,55 @@ export const KnowledgeStageView: React.FC<KnowledgeStageViewProps> = ({
         {/* Right Column (7 cols): User's Added Materials, Knowledge Report & K1-K4 Matrix */}
         <div className="lg:col-span-7 space-y-6">
           {materials.length === 0 && knowledgeNodes.length === 0 ? (
-            /* Blank Slate Guidance when user first opens the app */
-            <section className="bg-white border border-slate-200 rounded-lg p-8 sm:p-10 space-y-6">
-              <div className="space-y-2">
-                <div className="text-xs font-mono-tabular text-blue-600 font-semibold">
-                  当前状态：空白工作台 · 等待您提供个人阅读材料
-                </div>
-                <h2 className="text-xl font-bold text-slate-900">
-                  欢迎使用理论物理论文深度翻译与精准批注系统
+            /* Lightweight Blank-Slate Workflow Checklist */
+            <section className="bg-white border border-slate-200 rounded-lg p-6 space-y-4">
+              <div className="space-y-1">
+                <h2 className="text-base font-bold text-slate-900">
+                  四步科研精读工作流
                 </h2>
-                <p className="text-sm text-slate-600 leading-relaxed">
-                  本工作台不包含任何预设的静态演示数据。请按照以下标准科研流程开始您的论文精读任务：
+                <p className="text-xs text-slate-500">
+                  空白工作台不含预设演示数据，请从左侧录入个人已读教材或前置论文开始。
                 </p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-1.5">
-                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                    <BookOpen className="w-4 h-4 text-blue-600" />
-                    <span>第一步：在左侧录入您读过的教材/论文与章节范围</span>
+              <ol className="divide-y divide-slate-100 border border-slate-200 rounded-md text-xs">
+                <li className="p-3.5 flex items-start gap-3">
+                  <span className="font-mono-tabular font-bold text-blue-700 shrink-0">01.</span>
+                  <div>
+                    <div className="font-semibold text-slate-900">录入已读教材与章节范围</div>
+                    <p className="text-slate-600 mt-0.5">
+                      支持「第1–7章」「前四章」「跳过第3章」等表达，并可点击实时章节列表微调 K1 / K2 / K3。
+                    </p>
                   </div>
-                  <p className="text-slate-600 leading-relaxed">
-                    提供您读过的书籍名称及具体章节范围（例如 <em>Peskin QFT 第1–7章与第9章</em> 或 <em>Sakurai 前四章</em>）。系统会实时显示逐章范围识别预览，区分「已学习知识 (K1)」「接触半熟知识 (K2)」与「未读陌生知识 (K3)」。
-                  </p>
-                </div>
-
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-1.5">
-                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                    <Sparkles className="w-4 h-4 text-blue-600" />
-                    <span>第二步：生成《个人知识背景分析报告》</span>
+                </li>
+                <li className="p-3.5 flex items-start gap-3">
+                  <span className="font-mono-tabular font-bold text-blue-700 shrink-0">02.</span>
+                  <div>
+                    <div className="font-semibold text-slate-900">生成《个人知识背景分析报告》</div>
+                    <p className="text-slate-600 mt-0.5">
+                      汇总已确立基础 (K1)、半熟节点 (K2) 与未读边界防线 (K3)，作为后续批注过滤依据。
+                    </p>
                   </div>
-                  <p className="text-slate-600 leading-relaxed">
-                    录入完成后，点击右上角「生成《个人知识背景分析报告》」。您可以在右侧逐章列表中点击任意章节或概念微调 K1–K4 分级。
-                  </p>
-                </div>
-
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-1.5">
-                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                    <Search className="w-4 h-4 text-blue-600" />
-                    <span>第三步：导入待译英文论文并执行预分析</span>
+                </li>
+                <li className="p-3.5 flex items-start gap-3">
+                  <span className="font-mono-tabular font-bold text-blue-700 shrink-0">03.</span>
+                  <div>
+                    <div className="font-semibold text-slate-900">导入英文论文并确认缺口预分析</div>
+                    <p className="text-slate-600 mt-0.5">
+                      支持 arXiv ID / URL 联网拉取全文、PDF / .tex 上传或正文粘贴，逐节评估知识缺口。
+                    </p>
                   </div>
-                  <p className="text-slate-600 leading-relaxed">
-                    支持输入任意 <strong className="font-semibold text-slate-900">arXiv 编号 / URL</strong> 实时从互联网拉取论文全文与 LaTeX 公式，或上传 .tex / .txt 文件、粘贴英文段落。系统将先输出逐章知识缺口预分析报告。
-                  </p>
-                </div>
-
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-1.5">
-                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                    <FileText className="w-4 h-4 text-blue-600" />
-                    <span>第四步：确认预分析后生成纯中文精准批注文稿</span>
+                </li>
+                <li className="p-3.5 flex items-start gap-3">
+                  <span className="font-mono-tabular font-bold text-blue-700 shrink-0">04.</span>
+                  <div>
+                    <div className="font-semibold text-slate-900">生成纯中文精准批注文稿并导出</div>
+                    <p className="text-slate-600 mt-0.5">
+                      自动隐藏 K1 基础解释，对 K3/K4 障碍提供公式拆解、思维导图、AI 伴读导师及 Markdown / LaTeX / BibTeX 导出。
+                    </p>
                   </div>
-                  <p className="text-slate-600 leading-relaxed">
-                    经您确认后，系统执行全文中文学术翻译，自动省去 K1 已知基础解释，对 K3/K4 核心障碍提供五类深度批注与【原文推导】【补充推导】【独立核验】三级公式拆解。
-                  </p>
-                </div>
-              </div>
+                </li>
+              </ol>
             </section>
           ) : (
             <>

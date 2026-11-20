@@ -14,15 +14,18 @@ export const LatexBlock: React.FC<LatexBlockProps> = ({
   equationNumber,
   className = '',
 }) => {
-  const html = React.useMemo(() => {
+  const html = React.useMemo<string | null>(() => {
     try {
       return katex.renderToString(latex, {
         displayMode,
         throwOnError: false,
         strict: false,
+        trust: false,
+        maxExpand: 1000,
+        maxSize: 50,
       });
     } catch {
-      return latex;
+      return null;
     }
   }, [latex, displayMode]);
 
@@ -31,10 +34,16 @@ export const LatexBlock: React.FC<LatexBlockProps> = ({
       <div
         className={`my-4 py-3 px-4 bg-slate-50/90 border border-slate-200/80 rounded-md flex items-center justify-between gap-3 ${className}`}
       >
-        <div
-          className="min-w-0 flex-1 text-center text-slate-900 overflow-x-auto overflow-y-hidden [&_.katex-display]:my-0"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        {html !== null ? (
+          <div
+            className="min-w-0 flex-1 text-center text-slate-900 overflow-x-auto overflow-y-hidden [&_.katex-display]:my-0"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        ) : (
+          <code className="min-w-0 flex-1 text-center text-xs font-mono text-slate-700 break-all">
+            {latex}
+          </code>
+        )}
         {equationNumber && (
           <span className="font-mono-tabular text-xs text-slate-500 shrink-0 select-all">
             ({equationNumber})
@@ -42,6 +51,10 @@ export const LatexBlock: React.FC<LatexBlockProps> = ({
         )}
       </div>
     );
+  }
+
+  if (html === null) {
+    return <code className={`font-mono text-[0.92em] ${className}`}>{latex}</code>;
   }
 
   return (

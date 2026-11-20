@@ -20,12 +20,11 @@ import {
   RefreshCw,
   BookOpen,
   FileText,
-  Send,
-  MessageSquare,
 } from 'lucide-react';
 import type { GenerationMeta } from '../types/physics';
 import { DiagnosticAlert } from './DiagnosticAlert';
 import { apiFetch } from '../utils/quotaTracker';
+import { sanitizeExternalUrl } from '../utils/urlSafety';
 
 interface TerminologyAndVerificationViewProps {
   document: TranslatedPaperDocument;
@@ -105,74 +104,6 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
   const [arxivTermResult, setArxivTermResult] = useState<ArxivTermSearchResult | null>(null);
   const arxivCacheRef = useRef<Record<string, ArxivTermSearchResult>>({});
   const cloudSectionRef = useRef<HTMLElement | null>(null);
-
-  // Interactive Term Guide Q&A state
-  const [termGuideQuestion, setTermGuideQuestion] = useState('');
-  const [isAskingTermGuide, setIsAskingTermGuide] = useState(false);
-  const [termGuideAnswers, setTermGuideAnswers] = useState<
-    Record<string, Array<{ question: string; answer: string }>>
-  >({});
-
-  const handleAskTermGuide = async (customQuestion?: string) => {
-    if (!selectedCloudItem || isAskingTermGuide) return;
-    const q = (customQuestion ?? termGuideQuestion).trim();
-    if (!q) return;
-
-    setIsAskingTermGuide(true);
-    try {
-      const resp = await apiFetch('/api/paper-chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userMessage: q,
-          chatHistory: [],
-          activeLocation: {
-            sectionNumber: selectedCloudItem.firstAppearanceSection || '1',
-            sectionTitleZh: `核心术语导读：${selectedCloudItem.termZh}`,
-            sectionTitleEn: selectedCloudItem.termEn,
-            paragraphId: `term-${selectedCloudItem.id}`,
-            paragraphIndex: 1,
-            statementType: '关键定义',
-            translatedZhText:
-              arxivTermResult?.backgroundGuideZh ||
-              selectedCloudItem.definitionSummary ||
-              `${selectedCloudItem.termZh} (${selectedCloudItem.termEn})`,
-            originalEnExcerpt: selectedCloudItem.termEn,
-            equations: [],
-          },
-          documentContext: {
-            titleZh: document.titleZh,
-            titleEn: document.titleEn,
-            authors: document.authors,
-            abstractZh: document.abstractZh,
-            allSectionTitles: (document.sections || []).map(
-              (s) => `${s.sectionNumber} ${s.titleZh}`
-            ),
-          },
-          knowledgeNodes,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || '术语导读提问失败');
-      }
-      setTermGuideAnswers((prev) => ({
-        ...prev,
-        [selectedCloudItem.id]: [
-          ...(prev[selectedCloudItem.id] || []),
-          {
-            question: q,
-            answer: data.replyMarkdown || '已完成针对该术语的导读解析。',
-          },
-        ],
-      }));
-      if (!customQuestion) setTermGuideQuestion('');
-    } catch (err) {
-      setArxivTermError(err instanceof Error ? err.message : '术语导读助手请求失败');
-    } finally {
-      setIsAskingTermGuide(false);
-    }
-  };
 
   const audit = auditTerminologyConsistency(document);
 
@@ -502,94 +433,11 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
 
                 {!isSearchingArxivTerm && arxivTermResult && (
                   <div className="space-y-3.5">
-                    <div className="p-3.5 bg-white border border-slate-200 rounded space-y-3 text-xs text-slate-700 leading-relaxed">
-                      <div>
-                        <span className="font-semibold text-slate-900 mr-1">
-                          背景补充导读：
-                        </span>
-                        <MixedAcademicText text={arxivTermResult.backgroundGuideZh} />
-                      </div>
-
-                      {/* Interactive Follow-Up Q&A for Selected Term */}
-                      <div className="pt-2.5 border-t border-slate-100 space-y-2.5">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-[11px] font-medium text-slate-500">
-                            向导读助手追问此术语：
-                          </span>
-                          <button
-                            type="button"
-                            disabled={isAskingTermGuide}
-                            onClick={() =>
-                              handleAskTermGuide(
-                                `请详细解释「${selectedCloudItem.termZh}（${selectedCloudItem.termEn}）」在本文中的数学定义与核心物理作用。`
-                              )
-                            }
-                            className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 rounded text-[11px] font-medium transition-colors cursor-pointer"
-                          >
-                            <MessageSquare className="w-3 h-3 text-blue-600" />
-                            <span>在本文中的数学定义与作用</span>
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isAskingTermGuide}
-                            onClick={() =>
-                              handleAskTermGuide(
-                                `理解「${selectedCloudItem.termZh}」需要哪些教材前置知识？它与我已掌握的 K1 概念有何联系？`
-                              )
-                            }
-                            className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 rounded text-[11px] font-medium transition-colors cursor-pointer"
-                          >
-                            <MessageSquare className="w-3 h-3 text-blue-600" />
-                            <span>所需前置知识与教材衔接</span>
-                          </button>
-                        </div>
-
-                        {(termGuideAnswers[selectedCloudItem.id] || []).map((qa, qaIdx) => (
-                          <div
-                            key={qaIdx}
-                            className="p-2.5 bg-slate-50 border border-slate-200 rounded space-y-1.5 text-xs"
-                          >
-                            <div className="font-semibold text-blue-900">
-                              追问：{qa.question}
-                            </div>
-                            <div className="text-slate-800 whitespace-pre-line leading-relaxed">
-                              <MixedAcademicText text={qa.answer} />
-                            </div>
-                          </div>
-                        ))}
-
-                        <form
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            handleAskTermGuide();
-                          }}
-                          className="flex gap-2"
-                        >
-                          <label htmlFor="term-guide-qa-input" className="sr-only">
-                            向导读助手追问此术语
-                          </label>
-                          <input
-                            id="term-guide-qa-input"
-                            type="text"
-                            value={termGuideQuestion}
-                            onChange={(e) => setTermGuideQuestion(e.target.value)}
-                            placeholder={`针对「${selectedCloudItem.termZh}」向 Gemini 导读助手提问...`}
-                            className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-600"
-                          />
-                          <button
-                            type="submit"
-                            disabled={isAskingTermGuide || !termGuideQuestion.trim()}
-                            className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                          >
-                            {isAskingTermGuide ? (
-                              <RefreshCw className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <Send className="w-3 h-3" />
-                            )}
-                            <span>提问</span>
-                          </button>
-                        </form>
-                      </div>
+                    <div className="p-3.5 bg-white border border-slate-200 rounded text-xs text-slate-700 leading-relaxed">
+                      <span className="font-semibold text-slate-900 mr-1">
+                        背景补充导读：
+                      </span>
+                      <MixedAcademicText text={arxivTermResult.backgroundGuideZh} />
                     </div>
 
                     {arxivTermResult.papers.length === 0 ? (
@@ -611,33 +459,40 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
                       </div>
                     ) : (
                       <div className="divide-y divide-slate-200 border border-slate-200 rounded-md bg-white max-h-[380px] overflow-y-auto">
-                        {arxivTermResult.papers.map((paper) => (
-                          <article key={paper.arxivId} className="p-3.5 space-y-1.5">
-                            <div className="flex items-start justify-between gap-3">
-                              <h4 className="text-xs sm:text-sm font-semibold text-slate-900 leading-snug">
-                                {paper.title}
-                              </h4>
-                              <div className="flex items-center gap-2.5 shrink-0 text-xs">
-                                <a
-                                  href={paper.absUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 text-blue-600 hover:underline whitespace-nowrap"
-                                >
-                                  <span>摘要页</span>
-                                  <ExternalLink className="w-3 h-3" />
-                                </a>
-                                <a
-                                  href={paper.pdfUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 text-slate-700 hover:text-slate-900 hover:underline whitespace-nowrap"
-                                >
-                                  <FileText className="w-3 h-3" />
-                                  <span>PDF</span>
-                                </a>
+                        {arxivTermResult.papers.map((paper) => {
+                          const safeAbsUrl = sanitizeExternalUrl(paper.absUrl);
+                          const safePdfUrl = sanitizeExternalUrl(paper.pdfUrl);
+                          return (
+                            <article key={paper.arxivId} className="p-3.5 space-y-1.5">
+                              <div className="flex items-start justify-between gap-3">
+                                <h4 className="text-xs sm:text-sm font-semibold text-slate-900 leading-snug">
+                                  {paper.title}
+                                </h4>
+                                <div className="flex items-center gap-2.5 shrink-0 text-xs">
+                                  {safeAbsUrl && (
+                                    <a
+                                      href={safeAbsUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 text-blue-600 hover:underline whitespace-nowrap"
+                                    >
+                                      <span>摘要页</span>
+                                      <ExternalLink className="w-3 h-3" />
+                                    </a>
+                                  )}
+                                  {safePdfUrl && (
+                                    <a
+                                      href={safePdfUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 text-slate-700 hover:text-slate-900 hover:underline whitespace-nowrap"
+                                    >
+                                      <FileText className="w-3 h-3" />
+                                      <span>PDF</span>
+                                    </a>
+                                  )}
+                                </div>
                               </div>
-                            </div>
 
                             <div className="text-[11px] font-mono-tabular text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                               <span>arXiv:{paper.arxivId}</span>
@@ -666,7 +521,8 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
                               </p>
                             )}
                           </article>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -819,17 +675,20 @@ export const TerminologyAndVerificationView: React.FC<TerminologyAndVerification
                   </div>
                   <div className="flex items-center justify-between pt-1 text-slate-500 font-mono-tabular">
                     <span>ID: {cit.doiOrArxiv}</span>
-                    {cit.url && (
-                      <a
-                        href={cit.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-blue-600 hover:underline"
-                      >
-                        <span>DOI / arXiv 源</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
+                    {(() => {
+                      const safeCitUrl = sanitizeExternalUrl(cit.url);
+                      return safeCitUrl ? (
+                        <a
+                          href={safeCitUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-blue-600 hover:underline"
+                        >
+                          <span>DOI / arXiv 源</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ) : null;
+                    })()}
                   </div>
                 </div>
               ))}

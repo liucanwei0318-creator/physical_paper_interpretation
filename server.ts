@@ -31,6 +31,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   SUPPORTED_GEMINI_TEXT_MODELS,
   classifyGeminiError,
+  classifyModelProbeError,
   cleanAndParseJson,
   buildDegradedMeta,
   buildSuccessMeta,
@@ -47,14 +48,22 @@ import {
   normalizeTranslatedSection,
 } from './src/utils/paperChunker.ts';
 import { isNonPhysicsAdministrativeTerm } from './src/utils/terminologyCloud.ts';
+import {
+  sanitizeExternalUrl,
+  validateStrictArxivId,
+  validateOpenLibraryEditionKey,
+  validateOpenLibraryPath,
+} from './src/utils/urlSafety.ts';
 import type {
   GenerationMeta,
   PaperSectionChunk,
+  TranslatedParagraph,
   TranslatedSection,
   TerminologyEntry,
   SelectableGeminiModel,
   ModelRoutingMode,
   GeminiUsageLogEntry,
+  ModelConnectivityProbeResult,
 } from './src/types/physics.ts';
 
 dotenv.config();
@@ -206,13 +215,27 @@ async function generateWithCascadeDetailed(
   const timeoutMs = options.timeoutMs ?? 45000;
   const now = Date.now();
 
-  // Build ordered candidate models: always prioritize user's requestedModel first
+  const isHeavyReasoningModel = (model: SelectableGeminiModel): boolean =>
+    model === 'gemini-4-neon' ||
+    model === 'gemini-4-carbon' ||
+    model === 'gemini-4-argon';
+
+  // Build ordered candidate models: prioritize user's requestedModel first,
+  // followed immediately by fast healthy fallbacks (Hydrogen -> Flash-Lite) in cascade mode
+  const cascadeFallbackOrder: SelectableGeminiModel[] = [
+    'gemini-4-hydrogen',
+    'gemini-3.1-flash-lite',
+    ...SUPPORTED_GEMINI_TEXT_MODELS.filter(
+      (m) => m !== 'gemini-4-hydrogen' && m !== 'gemini-3.1-flash-lite'
+    ),
+  ];
+
   const candidatePool: SelectableGeminiModel[] =
     routingMode === 'strict'
       ? [requestedModel]
       : [
           requestedModel,
-          ...SUPPORTED_GEMINI_TEXT_MODELS.filter((m) => m !== requestedModel),
+          ...cascadeFallbackOrder.filter((m) => m !== requestedModel),
         ];
 
   const orderedModels =
@@ -243,12 +266,12 @@ async function generateWithCascadeDetailed(
 
     const perModelTimeoutMs =
       routingMode === 'strict'
-        ? modelName === 'gemini-4-argon'
+        ? isHeavyReasoningModel(modelName)
           ? Math.max(timeoutMs, 120_000)
           : modelName === 'gemini-4-hydrogen'
           ? Math.max(timeoutMs, 90_000)
           : Math.max(timeoutMs, 45_000)
-        : modelName === 'gemini-4-argon'
+        : isHeavyReasoningModel(modelName)
         ? Math.min(25_000, timeoutMs)
         : modelName === 'gemini-4-hydrogen'
         ? Math.min(12_000, timeoutMs)
@@ -279,6 +302,10 @@ async function generateWithCascadeDetailed(
         if (modelName === 'gemini-4-hydrogen') {
           config.thinkingConfig = {
             thinkingLevel: ThinkingLevel.LOW,
+          };
+        } else if (modelName === 'gemini-4-neon' && routingMode !== 'strict') {
+          config.thinkingConfig = {
+            thinkingLevel: ThinkingLevel.MEDIUM,
           };
         }
 
@@ -347,12 +374,24 @@ async function generateWithCascadeDetailed(
             }),
           };
         }
-        if (modelName === 'gemini-4-hydrogen' || modelName === 'gemini-4-argon') {
+        if (modelName === 'gemini-4-hydrogen' || isHeavyReasoningModel(modelName)) {
           modelCooldownUntil.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
         }
       } catch (err) {
         lastClassified = classifyGeminiError(err);
+        const rawErrLower =
+          (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
+        const isInvalidApiKey = rawErrLower.includes('api_key_invalid') || rawErrLower.includes('api key not valid');
         if (!lastClassified.retryable) {
+          if (
+            routingMode !== 'strict' &&
+            !isInvalidApiKey &&
+            isHeavyReasoningModel(modelName) &&
+            idx < orderedModels.length - 1
+          ) {
+            modelCooldownUntil.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
+            break;
+          }
           const latencyMs = Math.max(1, Date.now() - callStartMs);
           recordServerUsageEntry({
             id: `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -383,7 +422,7 @@ async function generateWithCascadeDetailed(
             ),
           };
         }
-        if (modelName === 'gemini-4-hydrogen' || modelName === 'gemini-4-argon') {
+        if (modelName === 'gemini-4-hydrogen' || isHeavyReasoningModel(modelName)) {
           modelCooldownUntil.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
           break;
         }
@@ -441,8 +480,8 @@ async function searchArxivApi(query: string, maxResults: number = 5): Promise<Gr
   try {
     const cleanArxivIdMatch = query.match(/(?:arxiv:)?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+\/\d{7}(?:v\d+)?)/i);
     const url = cleanArxivIdMatch
-      ? `http://export.arxiv.org/api/query?id_list=${encodeURIComponent(cleanArxivIdMatch[1])}`
-      : `http://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=${maxResults}`;
+      ? `https://export.arxiv.org/api/query?id_list=${encodeURIComponent(cleanArxivIdMatch[1])}`
+      : `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=${maxResults}`;
 
     const resp = await fetch(url, { signal: AbortSignal.timeout(9000) });
     if (!resp.ok) return [];
@@ -488,14 +527,14 @@ async function fetchArxivFullTextById(arxivId: string): Promise<{
   sources: GroundingSource[];
   extractionWarning?: string;
 } | null> {
-  const cleanIdMatch = arxivId.match(/(?:arxiv:|abs\/|pdf\/|html\/)?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+\/\d{7}(?:v\d+)?)/i);
-  const normalizedId = cleanIdMatch ? cleanIdMatch[1] : arxivId.trim();
+  const strictInputId = validateStrictArxivId(arxivId);
+  const querySeed = strictInputId || arxivId.trim();
 
-  const metaSources = await searchArxivApi(normalizedId, 1);
+  const metaSources = await searchArxivApi(querySeed, 1);
   let title = '';
   let authors = '';
   let abstractText = '';
-  let uri = `https://arxiv.org/abs/${normalizedId}`;
+  let uri = strictInputId ? `https://arxiv.org/abs/${strictInputId}` : '';
 
   if (metaSources.length > 0) {
     const top = metaSources[0];
@@ -503,28 +542,35 @@ async function fetchArxivFullTextById(arxivId: string): Promise<{
     title = parenIdx > 0 ? top.title.slice(0, parenIdx) : top.title;
     authors = parenIdx > 0 ? top.title.slice(parenIdx + 2, -1) : '';
     abstractText = top.snippet || '';
-    uri = top.uri;
+    uri = sanitizeExternalUrl(top.uri) || uri;
+  }
+
+  const verifiedArxivId = strictInputId || validateStrictArxivId(uri);
+  if (!uri && verifiedArxivId) {
+    uri = `https://arxiv.org/abs/${verifiedArxivId}`;
   }
 
   let extractedBody = '';
   let extractionWarning = '';
-  try {
-    const ar5ivUrl = `https://ar5iv.labs.arxiv.org/html/${normalizedId}`;
-    const htmlResp = await fetch(ar5ivUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PhysicaAnnotate/1.0)' },
-      signal: AbortSignal.timeout(12000),
-    });
-    if (htmlResp.ok) {
-      const html = await htmlResp.text();
-      extractedBody = extractStructuredTextFromAr5ivHtml(html, abstractText);
+  if (verifiedArxivId) {
+    try {
+      const ar5ivUrl = `https://ar5iv.labs.arxiv.org/html/${verifiedArxivId}`;
+      const htmlResp = await fetch(ar5ivUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PhysicaAnnotate/1.0)' },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (htmlResp.ok) {
+        const html = await htmlResp.text();
+        extractedBody = extractStructuredTextFromAr5ivHtml(html, abstractText);
+      }
+    } catch {
+      // ar5iv unreachable or timed out
     }
-  } catch {
-    // ar5iv unreachable or timed out
   }
 
   if (!extractedBody && abstractText) {
     const aiRes = await generateWithCascadeDetailed(
-      `Retrieve and reconstruct the key sections, mathematical equations (in standard LaTeX), definitions, and core derivations of the theoretical physics paper "${title || normalizedId}" (${uri}). Abstract context: ${abstractText}. Output the detailed English academic text with original section headings and LaTeX equations.`
+      `Retrieve and reconstruct the key sections, mathematical equations (in standard LaTeX), definitions, and core derivations of the theoretical physics paper "${title || verifiedArxivId || querySeed}" (${uri}). Abstract context: ${abstractText}. Output the detailed English academic text with original section headings and LaTeX equations.`
     );
     if (aiRes.text && aiRes.text.length > 100) {
       extractedBody = aiRes.text;
@@ -542,7 +588,7 @@ async function fetchArxivFullTextById(arxivId: string): Promise<{
     : `1. Abstract and Core Formulation\n${abstractText}`;
 
   return {
-    title: title || `arXiv:${normalizedId}`,
+    title: title || (verifiedArxivId ? `arXiv:${verifiedArxivId}` : querySeed),
     authors: authors || 'arXiv Authors',
     abstractText,
     fullTextSections,
@@ -683,23 +729,27 @@ async function searchOpenLibraryWithToc(
     };
     const docs = data.docs || [];
     const sources: GroundingSource[] = docs
-      .filter((d) => d.title && d.key)
-      .map((d) => ({
-        title: `${d.title}${d.author_name ? ` — ${d.author_name.slice(0, 2).join(', ')}` : ''}${
-          d.first_publish_year ? ` (${d.first_publish_year})` : ''
-        }`,
-        uri: `https://openlibrary.org${d.key}`,
-        sourceType: 'OpenLibrary' as const,
-        snippet: d.subject ? `Subjects: ${d.subject.slice(0, 5).join(', ')}` : 'OpenLibrary Catalog Record',
-      }));
+      .map((d) => {
+        const safePath = validateOpenLibraryPath(d.key);
+        if (!d.title || !safePath) return null;
+        return {
+          title: `${d.title}${d.author_name ? ` — ${d.author_name.slice(0, 2).join(', ')}` : ''}${
+            d.first_publish_year ? ` (${d.first_publish_year})` : ''
+          }`,
+          uri: `https://openlibrary.org${safePath}`,
+          sourceType: 'OpenLibrary' as const,
+          snippet: d.subject ? `Subjects: ${d.subject.slice(0, 5).join(', ')}` : 'OpenLibrary Catalog Record',
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
 
-    // Try fetching TOC from the first edition key if available
+    // Try fetching TOC from the first validated edition key if available
     const tocTitles: string[] = [];
-    const firstEditionKey = docs[0]?.edition_key?.[0];
-    if (firstEditionKey) {
+    const safeEditionKey = validateOpenLibraryEditionKey(docs[0]?.edition_key?.[0]);
+    if (safeEditionKey) {
       try {
         const edResp = await fetch(
-          `https://openlibrary.org/api/books?bibkeys=OLID:${firstEditionKey}&format=json&jscmd=data`,
+          `https://openlibrary.org/api/books?bibkeys=OLID:${encodeURIComponent(safeEditionKey)}&format=json&jscmd=data`,
           { signal: AbortSignal.timeout(5000) }
         );
         if (edResp.ok) {
@@ -707,7 +757,7 @@ async function searchOpenLibraryWithToc(
             string,
             { table_of_contents?: Array<{ title?: string }> }
           >;
-          const toc = edData[`OLID:${firstEditionKey}`]?.table_of_contents || [];
+          const toc = edData[`OLID:${safeEditionKey}`]?.table_of_contents || [];
           for (const item of toc) {
             if (item.title && item.title.trim().length > 2) {
               tocTitles.push(item.title.trim());
@@ -941,7 +991,31 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '35mb' }));
+  // Hide framework fingerprint and set iframe-compatible security headers
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+  });
+
+  // Scope large JSON body limit strictly to PDF base64 uploads; keep default endpoints bounded
+  app.use('/api/parse-pdf', express.json({ limit: '35mb' }));
+  app.use(express.json({ limit: '4mb' }));
+
+  // Return clean JSON errors for malformed JSON or oversized request payloads (never leak stack traces)
+  app.use((err: { status?: number; type?: string }, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err?.type === 'entity.too.large' || err?.status === 413) {
+      res.status(413).json({ error: '请求体过大，请精简文本或上传不超过 25 MB 的 PDF 文件。' });
+      return;
+    }
+    if (err?.type === 'entity.parse.failed' || err?.status === 400) {
+      res.status(400).json({ error: '请求 JSON 格式无效。' });
+      return;
+    }
+    next(err);
+  });
 
   // Per-request Gemini model routing context middleware for /api/*
   app.use('/api', (req, _res, next) => {
@@ -969,8 +1043,6 @@ async function startServer() {
       ok: true,
       hasGeminiKey: Boolean(getGenAIClient()),
       supportedModels: SUPPORTED_GEMINI_TEXT_MODELS,
-      nodeVersion: process.version,
-      env: process.env.NODE_ENV || 'development',
     });
   });
 
@@ -987,6 +1059,121 @@ async function startServer() {
     serverUsageLedger.length = 0;
     flushServerLedgerToDisk(serverUsageLedger);
     res.json({ ok: true });
+  });
+
+  // Live one-click connectivity probe for all supported Gemini models under current server GEMINI_API_KEY
+  app.post('/api/probe-models', async (req, res) => {
+    const body = (req.body || {}) as {
+      models?: unknown;
+      timeoutMs?: unknown;
+    };
+    const requestedList = Array.isArray(body.models)
+      ? body.models
+          .map((m) => (typeof m === 'string' ? m.trim() : ''))
+          .filter((m): m is SelectableGeminiModel =>
+            (SUPPORTED_GEMINI_TEXT_MODELS as readonly string[]).includes(m)
+          )
+      : [];
+    const targetModels: SelectableGeminiModel[] =
+      requestedList.length > 0 ? Array.from(new Set(requestedList)) : [...SUPPORTED_GEMINI_TEXT_MODELS];
+
+    const rawTimeout = typeof body.timeoutMs === 'number' ? body.timeoutMs : Number(body.timeoutMs);
+    const probeTimeoutMs =
+      Number.isFinite(rawTimeout) && rawTimeout >= 3_000 && rawTimeout <= 30_000
+        ? Math.round(rawTimeout)
+        : 12_000;
+
+    const checkedAt = new Date().toISOString();
+    const ai = getGenAIClient();
+
+    if (!ai) {
+      const missingResults: ModelConnectivityProbeResult[] = targetModels.map((model) => ({
+        model,
+        ok: false,
+        status: 'missing_key',
+        statusLabelZh: '未配置 API Key',
+        detailZh: '服务端未检测到有效的 GEMINI_API_KEY，请在 Settings > Secrets 中绑定密钥。',
+        latencyMs: 0,
+      }));
+      res.json({
+        ok: true,
+        hasGeminiKey: false,
+        checkedAt,
+        timeoutMs: probeTimeoutMs,
+        results: missingResults,
+      });
+      return;
+    }
+
+    const results = await Promise.all(
+      targetModels.map(async (model): Promise<ModelConnectivityProbeResult> => {
+        const start = Date.now();
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const config: Record<string, unknown> = {};
+          if (model !== 'gemini-3.1-flash-lite') {
+            config.thinkingConfig = {
+              thinkingLevel: ThinkingLevel.LOW,
+            };
+          }
+
+          const response = await Promise.race([
+            ai.models.generateContent({
+              model,
+              contents: 'Reply with only: OK',
+              config: Object.keys(config).length > 0 ? config : undefined,
+            }),
+            new Promise<never>((_, reject) => {
+              timeoutHandle = setTimeout(
+                () => reject(new Error(`TimeoutError: ${probeTimeoutMs}ms exceeded`)),
+                probeTimeoutMs
+              );
+            }),
+          ]);
+
+          const latencyMs = Math.max(1, Date.now() - start);
+          const replyText = (response.text || '').trim();
+          const modelVersion = (response as unknown as { modelVersion?: string }).modelVersion;
+
+          if (!replyText) {
+            return {
+              model,
+              ok: false,
+              status: 'error',
+              statusLabelZh: '返回空响应',
+              detailZh: '模型已连接但未返回有效文本内容。',
+              latencyMs,
+              modelVersion,
+            };
+          }
+
+          return {
+            model,
+            ok: true,
+            status: 'available',
+            statusLabelZh: '实测可直连',
+            detailZh: `真实返回响应（${(latencyMs / 1000).toFixed(1)}s${modelVersion ? ` · ${modelVersion}` : ''}），当前 Key 可直接调用。`,
+            latencyMs,
+            httpStatus: 200,
+            modelVersion,
+          };
+        } catch (err) {
+          return classifyModelProbeError(model, err, Date.now() - start);
+        } finally {
+          if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+          }
+        }
+      })
+    );
+
+    res.json({
+      ok: true,
+      hasGeminiKey: true,
+      checkedAt,
+      timeoutMs: probeTimeoutMs,
+      results,
+    });
   });
 
   // 1. Live Internet Retrieval & Academic Verification Endpoint
@@ -2094,13 +2281,23 @@ ${buildGeminiAnnotationDetailDirective(detailLevel, 'deep_dive')}
         fileName?: string;
         pdfBase64?: string;
       };
-      if (!pdfBase64 || !pdfBase64.trim()) {
+      if (typeof pdfBase64 !== 'string' || !pdfBase64.trim()) {
         res.status(400).json({ error: '未收到有效的 PDF 文件内容。' });
         return;
       }
 
       const cleanBase64 = pdfBase64.replace(/^data:application\/pdf;base64,/, '').trim();
       const buffer = Buffer.from(cleanBase64, 'base64');
+      const MAX_PDF_BYTES = 25 * 1024 * 1024;
+      if (buffer.length === 0 || buffer.length > MAX_PDF_BYTES) {
+        res.status(413).json({ error: 'PDF 文件大小无效或超出 25 MB 限制。' });
+        return;
+      }
+      const headerProbe = buffer.subarray(0, Math.min(buffer.length, 1024)).toString('latin1');
+      if (!headerProbe.includes('%PDF-')) {
+        res.status(400).json({ error: '上传文件缺少标准 PDF 文件头（%PDF-），请确认选择的是有效 PDF 论文。' });
+        return;
+      }
       const uint8Array = new Uint8Array(buffer);
 
       let rawExtractedText = '';
@@ -2120,7 +2317,10 @@ ${buildGeminiAnnotationDetailDirective(detailLevel, 'deep_dive')}
         rawExtractedText = normalizeExtractedPdfText(textChunks.join(' '));
       }
 
-      const cleanFileNameTitle = (fileName || 'Theoretical Physics Manuscript')
+      const safeFileName = (typeof fileName === 'string' ? fileName : 'Theoretical Physics Manuscript')
+        .replace(/[\u0000-\u001F\u007F]/g, '')
+        .slice(0, 200);
+      const cleanFileNameTitle = safeFileName
         .replace(/\.pdf$/i, '')
         .replace(/[_-]+/g, ' ')
         .trim();
@@ -2465,7 +2665,7 @@ ${buildGeminiAnnotationDetailDirective(detailLevel, 'chat')}`;
 
       const fetchArxivXml = async (searchQueryExpr: string, maxResults = 8): Promise<ArxivRelatedPaper[]> => {
         try {
-          const url = `http://export.arxiv.org/api/query?search_query=${encodeURIComponent(
+          const url = `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(
             searchQueryExpr
           )}&start=0&max_results=${maxResults}&sortBy=relevance&sortOrder=descending`;
           const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
@@ -2552,7 +2752,7 @@ ${paperListContext}
         paperTitleZh?: string;
         sectionNumber?: string;
         sectionTitleZh?: string;
-        paragraph?: any;
+        paragraph?: TranslatedParagraph;
         knowledgeNodes?: Array<{
           conceptNameZh: string;
           conceptNameEn: string;

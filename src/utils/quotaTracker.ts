@@ -35,6 +35,18 @@ export const GEMINI_OFFICIAL_LIMITS: Record<
       rpd: 500,
       tierLabelZh: '免费层级 (Free Tier)',
     },
+    'gemini-4-neon': {
+      rpm: 5,
+      tpm: 250_000,
+      rpd: 100,
+      tierLabelZh: '免费层级 (Free Tier)',
+    },
+    'gemini-4-carbon': {
+      rpm: 5,
+      tpm: 250_000,
+      rpd: 100,
+      tierLabelZh: '免费层级 (Free Tier)',
+    },
     'gemini-4-argon': {
       rpm: 5,
       tpm: 250_000,
@@ -53,6 +65,18 @@ export const GEMINI_OFFICIAL_LIMITS: Record<
       rpm: 1_000,
       tpm: 4_000_000,
       rpd: 10_000,
+      tierLabelZh: '付费层级 (Tier 1)',
+    },
+    'gemini-4-neon': {
+      rpm: 300,
+      tpm: 4_000_000,
+      rpd: 2_500,
+      tierLabelZh: '付费层级 (Tier 1)',
+    },
+    'gemini-4-carbon': {
+      rpm: 150,
+      tpm: 2_000_000,
+      rpd: 1_000,
       tierLabelZh: '付费层级 (Tier 1)',
     },
     'gemini-4-argon': {
@@ -115,17 +139,41 @@ export const GEMINI_MODEL_PROFILES: Record<SelectableGeminiModel, GeminiModelPro
     reasoningRating: '高 (High STEM)',
     recommendedForZh: '全文分节翻译、章节预分析、教材范围建模',
   },
+  'gemini-4-neon': {
+    model: 'gemini-4-neon',
+    shortName: 'Neon',
+    badgeText: '复杂推理 Pro · 需付费 Key',
+    titleZh: 'Gemini 4 Neon (gemini-4-neon)',
+    descriptionZh:
+      'Google 最新一代 Gemini 4 Pro 旗舰模型，专精复杂数学推导、STEM 多步严密论证与跨文献综合分析。',
+    speedRating: '中快 (Balanced Pro)',
+    reasoningRating: '极高 (Gemini 4 Pro)',
+    recommendedForZh: '复杂理论推导、长篇精读全局综合、疑难批注精校',
+    freeTierWarningZh: '付费层级模型：未绑定付费 Key 时级联模式将自动回退至 Hydrogen',
+  },
+  'gemini-4-carbon': {
+    model: 'gemini-4-carbon',
+    shortName: 'Carbon',
+    badgeText: '极限科学证明 · 需付费 Key',
+    titleZh: 'Gemini 4 Carbon (gemini-4-carbon)',
+    descriptionZh:
+      '面向极端推理深度的科学证明模型，适合复杂物理定律边界校验、公理化推导审计与高难公式拆解。',
+    speedRating: '中等 (Deep Proof)',
+    reasoningRating: '巅峰 (Max Proof Depth)',
+    recommendedForZh: '数学物理定理证明、推导漏洞审计、疑难公式逐步还原',
+    freeTierWarningZh: '付费层级模型：未绑定付费 Key 时级联模式将自动回退至 Hydrogen',
+  },
   'gemini-4-argon': {
     model: 'gemini-4-argon',
     shortName: 'Argon',
-    badgeText: '深度推理旗舰 · 免费层每日仅 100 次',
+    badgeText: '深度推理专精 · 需付费 Key',
     titleZh: 'Gemini 4 Argon (gemini-4-argon)',
     descriptionZh:
       '针对复杂张量演算、高阶微扰圈图、全息纠缠熵与数学物理定理证明强化深度推理，适合疑难段落精读与伴读追问。',
     speedRating: '中等 (Deep Reasoning)',
     reasoningRating: '极高 (Flagship Pro)',
     recommendedForZh: '复杂数学推导还原、伴读导师深度追问、公式推导思维导图',
-    freeTierWarningZh: '免费层每日仅 100 次 (100 RPD / 5 RPM)，超限易触发 429',
+    freeTierWarningZh: '付费层级每日配额受限（100 RPD 参考），超限或无权限时自动级联回退',
   },
   'gemini-3.1-flash-lite': {
     model: 'gemini-3.1-flash-lite',
@@ -269,6 +317,8 @@ export function computeQuotaSummary(
     { calls: number; promptTokens: number; completionTokens: number; totalTokens: number }
   >([
     ['gemini-4-hydrogen', { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 }],
+    ['gemini-4-neon', { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 }],
+    ['gemini-4-carbon', { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 }],
     ['gemini-4-argon', { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 }],
     ['gemini-3.1-flash-lite', { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 }],
   ]);
@@ -494,6 +544,8 @@ export function computeOfficialModelQuotas(
 
   const models: SelectableGeminiModel[] = [
     'gemini-4-hydrogen',
+    'gemini-4-neon',
+    'gemini-4-carbon',
     'gemini-4-argon',
     'gemini-3.1-flash-lite',
   ];
@@ -701,6 +753,15 @@ export function computeModelRecommendation(params: {
   }
 
   let recommendedModel: SelectableGeminiModel = taskProfile.defaultModel;
+  if (
+    taskType === 'deep_derivation' &&
+    budgetStatus === 'ample' &&
+    (currentPreferredModel === 'gemini-4-neon' ||
+      currentPreferredModel === 'gemini-4-carbon' ||
+      currentPreferredModel === 'gemini-4-argon')
+  ) {
+    recommendedModel = currentPreferredModel;
+  }
   if (budgetStatus === 'critical' || hasObservedFallback) {
     recommendedModel = 'gemini-3.1-flash-lite';
   } else if (budgetStatus === 'tight') {
@@ -743,11 +804,11 @@ export function computeModelRecommendation(params: {
         `在「${taskProfile.labelZh}」场景下切换至 Flash-Lite 可显著节省 Token 消耗，并享有更高的官方 RPM/RPD 并发余量。`;
     } else {
       headlineZh = shouldPromptSwitch
-        ? `预算紧张（峰值 ${peakUtilizationPercent}%）：建议由 Argon 降档为 Hydrogen`
+        ? `预算紧张（峰值 ${peakUtilizationPercent}%）：建议由 ${GEMINI_MODEL_PROFILES[currentPreferredModel].shortName} 降档为 Hydrogen`
         : `预算紧张（峰值 ${peakUtilizationPercent}%）：Hydrogen 可平衡推导精度与配额`;
       rationaleZh =
         `${pressureSourceZh}（今日剩余 ${remainingDailyTokens.toLocaleString()} Tokens）。` +
-        `当前为「${taskProfile.labelZh}」任务，Hydrogen 在保持数学推导准确度的同时消耗低于旗舰 Argon；若配额继续逼近 75%，建议直接切换至 Flash-Lite。`;
+        `当前为「${taskProfile.labelZh}」任务，Hydrogen 在保持数学推导准确度的同时消耗低于深度推理旗舰；若配额继续逼近 75%，建议直接切换至 Flash-Lite。`;
     }
   } else {
     headlineZh = shouldPromptSwitch
@@ -757,10 +818,14 @@ export function computeModelRecommendation(params: {
       rationaleZh =
         `当前额度余量充足（今日剩余 ${remainingDailyTokens.toLocaleString()} Tokens）。` +
         `「${taskProfile.labelZh}」以高速结构化检索与目录提取为主，轻量级 Flash-Lite 响应最快且几乎不占主力推理配额。`;
-    } else if (recommendedModel === 'gemini-4-argon') {
+    } else if (
+      recommendedModel === 'gemini-4-argon' ||
+      recommendedModel === 'gemini-4-neon' ||
+      recommendedModel === 'gemini-4-carbon'
+    ) {
       rationaleZh =
         `当前额度余量充足（今日剩余 ${remainingDailyTokens.toLocaleString()} Tokens）。` +
-        `「${taskProfile.labelZh}」涉及高阶物理公式与严密数学推导，旗舰 Argon 可提供最高推理深度。`;
+        `「${taskProfile.labelZh}」涉及高阶物理公式与严密数学推导，旗舰 ${recommendedShortName} 可提供最高推理深度。`;
     } else {
       rationaleZh =
         `当前额度余量充足（今日剩余 ${remainingDailyTokens.toLocaleString()} Tokens）。` +
@@ -915,6 +980,7 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
     isApiCall &&
     !urlStr.includes('/api/health') &&
     !urlStr.includes('/api/usage-stats') &&
+    !urlStr.includes('/api/probe-models') &&
     !urlStr.includes('/api/fetch-arxiv')
   ) {
     try {
