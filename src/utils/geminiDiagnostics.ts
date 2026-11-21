@@ -79,6 +79,19 @@ export function classifyGeminiError(err: unknown): ClassifiedGeminiError {
   }
 
   if (
+    lower.includes('503') ||
+    lower.includes('unavailable') ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded')
+  ) {
+    return {
+      errorCode: 'NETWORK_ERROR',
+      reasonZh: 'Google 官方模型节点当前处于高峰拥塞 (503 High Demand)，建议启用智能级联自动切换至 Flash-Lite 或稍后重试。',
+      retryable: true,
+    };
+  }
+
+  if (
     lower.includes('timeout') ||
     lower.includes('aborterror') ||
     lower.includes('timeouterror') ||
@@ -186,6 +199,24 @@ export function classifyModelProbeError(
       detailZh: 'Google API 返回 404 NOT_FOUND，当前区域或账号暂未开放该模型 ID。',
       latencyMs: safeLatency,
       httpStatus: 404,
+    };
+  }
+
+  if (
+    lower.includes('503') ||
+    lower.includes('unavailable') ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded')
+  ) {
+    return {
+      model,
+      ok: false,
+      status: 'error',
+      statusLabelZh: '503 官方高峰拥塞',
+      detailZh:
+        'Google 服务端返回 503（当前模型高负载排队，属官方临时拥塞，非密钥配置错误）；建议保持「智能级联」自动回退至 Flash-Lite，或稍后再试。',
+      latencyMs: safeLatency,
+      httpStatus: 503,
     };
   }
 

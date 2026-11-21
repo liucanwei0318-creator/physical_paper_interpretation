@@ -1471,7 +1471,7 @@ export default function App() {
               showToast(
                 nextMode === 'strict'
                   ? `● 已开启「严格锁定模型」：仅调用 ${GEMINI_MODEL_PROFILES[preferredGeminiModel].shortName}`
-                  : '● 已开启「智能级联容错」：优先调用所选模型，遇超时自动平滑回退'
+                  : '● 已开启「智能级联容错」：优先调用所选模型（Hydrogen 不因耗时过长自动切换，仅遇配额/错误时回退）'
               );
             }}
             accountTier={geminiAccountTier}

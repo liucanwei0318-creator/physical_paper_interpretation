@@ -264,21 +264,24 @@ async function generateWithCascadeDetailed(
       continue;
     }
 
-    const perModelTimeoutMs =
-      routingMode === 'strict'
+    const perModelTimeoutMs: number | null =
+      modelName === 'gemini-4-hydrogen'
+        ? null
+        : routingMode === 'strict'
         ? isHeavyReasoningModel(modelName)
           ? Math.max(timeoutMs, 120_000)
-          : modelName === 'gemini-4-hydrogen'
-          ? Math.max(timeoutMs, 90_000)
           : Math.max(timeoutMs, 45_000)
         : isHeavyReasoningModel(modelName)
-        ? Math.min(25_000, timeoutMs)
-        : modelName === 'gemini-4-hydrogen'
-        ? Math.min(12_000, timeoutMs)
+        ? Math.min(30_000, timeoutMs)
         : timeoutMs;
-    const maxAttempts = modelName === 'gemini-3.1-flash-lite' ? 2 : 1;
+    const maxAttempts =
+      modelName === 'gemini-3.1-flash-lite' ||
+      (routingMode === 'strict' && modelName === 'gemini-4-hydrogen')
+        ? 2
+        : 1;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let attemptTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
       try {
         const contents = options.pdfBase64
           ? [
@@ -309,19 +312,23 @@ async function generateWithCascadeDetailed(
           };
         }
 
-        const response = await Promise.race([
-          ai.models.generateContent({
-            model: modelName,
-            contents,
-            config: Object.keys(config).length > 0 ? config : undefined,
-          }),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error(`TimeoutError: ${perModelTimeoutMs}ms exceeded`)),
-              perModelTimeoutMs
-            )
-          ),
-        ]);
+        const requestPromise = ai.models.generateContent({
+          model: modelName,
+          contents,
+          config: Object.keys(config).length > 0 ? config : undefined,
+        });
+        const response =
+          perModelTimeoutMs === null
+            ? await requestPromise
+            : await Promise.race([
+                requestPromise,
+                new Promise<never>((_, reject) => {
+                  attemptTimeoutHandle = setTimeout(
+                    () => reject(new Error(`TimeoutError: ${perModelTimeoutMs}ms exceeded`)),
+                    perModelTimeoutMs
+                  );
+                }),
+              ]);
 
         if (response.text && response.text.trim()) {
           modelCooldownUntil.delete(modelName);
@@ -374,7 +381,7 @@ async function generateWithCascadeDetailed(
             }),
           };
         }
-        if (modelName === 'gemini-4-hydrogen' || isHeavyReasoningModel(modelName)) {
+        if (isHeavyReasoningModel(modelName)) {
           modelCooldownUntil.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
         }
       } catch (err) {
@@ -422,13 +429,67 @@ async function generateWithCascadeDetailed(
             ),
           };
         }
-        if (modelName === 'gemini-4-hydrogen' || isHeavyReasoningModel(modelName)) {
+        const isTransientOverload =
+          rawErrLower.includes('503') ||
+          rawErrLower.includes('high demand') ||
+          rawErrLower.includes('unavailable');
+        if (
+          routingMode === 'strict' &&
+          attempt < maxAttempts &&
+          (lastClassified.errorCode === 'RATE_LIMIT_429' || isTransientOverload)
+        ) {
+          await new Promise((r) => setTimeout(r, 1800 * attempt));
+          continue;
+        }
+        if (
+          modelName === 'gemini-4-hydrogen' &&
+          requestedModel === 'gemini-4-hydrogen' &&
+          lastClassified.errorCode === 'TIMEOUT'
+        ) {
+          const latencyMs = Math.max(1, Date.now() - callStartMs);
+          recordServerUsageEntry({
+            id: `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            endpoint,
+            stageLabelZh: inferStageLabelZhFromEndpoint(endpoint),
+            requestedModel,
+            actualModel: 'deterministic_fallback',
+            promptTokens: estimatedPromptTokens,
+            completionTokens: 0,
+            totalTokens: estimatedPromptTokens,
+            latencyMs,
+            degraded: true,
+          });
+          return {
+            text: null,
+            meta: buildDegradedMeta(
+              lastClassified.errorCode,
+              `Gemini 4 Hydrogen 上游响应超时（耗时 ${(latencyMs / 1000).toFixed(1)}s，未自动切换其他模型）。`,
+              true,
+              {
+                requestedModel,
+                promptTokens: estimatedPromptTokens,
+                completionTokens: 0,
+                totalTokens: estimatedPromptTokens,
+                latencyMs,
+              }
+            ),
+          };
+        }
+        if (isHeavyReasoningModel(modelName)) {
           modelCooldownUntil.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
+          break;
+        }
+        if (modelName === 'gemini-4-hydrogen') {
           break;
         }
         if (attempt < maxAttempts && lastClassified.errorCode === 'RATE_LIMIT_429') {
           await new Promise((r) => setTimeout(r, 1600 * attempt));
           continue;
+        }
+      } finally {
+        if (attemptTimeoutHandle) {
+          clearTimeout(attemptTimeoutHandle);
         }
       }
     }
@@ -1079,9 +1140,9 @@ async function startServer() {
 
     const rawTimeout = typeof body.timeoutMs === 'number' ? body.timeoutMs : Number(body.timeoutMs);
     const probeTimeoutMs =
-      Number.isFinite(rawTimeout) && rawTimeout >= 3_000 && rawTimeout <= 30_000
+      Number.isFinite(rawTimeout) && rawTimeout >= 3_000 && rawTimeout <= 35_000
         ? Math.round(rawTimeout)
-        : 12_000;
+        : 20_000;
 
     const checkedAt = new Date().toISOString();
     const ai = getGenAIClient();
@@ -1117,19 +1178,23 @@ async function startServer() {
             };
           }
 
-          const response = await Promise.race([
-            ai.models.generateContent({
-              model,
-              contents: 'Reply with only: OK',
-              config: Object.keys(config).length > 0 ? config : undefined,
-            }),
-            new Promise<never>((_, reject) => {
-              timeoutHandle = setTimeout(
-                () => reject(new Error(`TimeoutError: ${probeTimeoutMs}ms exceeded`)),
-                probeTimeoutMs
-              );
-            }),
-          ]);
+          const probeRequest = ai.models.generateContent({
+            model,
+            contents: 'Reply with only: OK',
+            config: Object.keys(config).length > 0 ? config : undefined,
+          });
+          const response =
+            model === 'gemini-4-hydrogen'
+              ? await probeRequest
+              : await Promise.race([
+                  probeRequest,
+                  new Promise<never>((_, reject) => {
+                    timeoutHandle = setTimeout(
+                      () => reject(new Error(`TimeoutError: ${probeTimeoutMs}ms exceeded`)),
+                      probeTimeoutMs
+                    );
+                  }),
+                ]);
 
           const latencyMs = Math.max(1, Date.now() - start);
           const replyText = (response.text || '').trim();

@@ -137,7 +137,7 @@ export const QuotaAndModelModal: React.FC<QuotaAndModelModalProps> = ({
       const resp = await apiFetch('/api/probe-models', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ timeoutMs: 12_000 }),
+        body: JSON.stringify({ timeoutMs: 20_000 }),
       });
       const data = (await resp.json()) as ModelConnectivityProbeResponse & { error?: string };
       if (!resp.ok || !Array.isArray(data.results)) {
@@ -437,7 +437,7 @@ export const QuotaAndModelModal: React.FC<QuotaAndModelModalProps> = ({
                   <div className="flex items-center gap-2">
                     <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin shrink-0" />
                     <span>
-                      正在绕开级联回退，并行向 Google Gemini API 发送真实探测请求（单模型限时 12s，不计入科研 Token 账单）...
+                      正在绕开级联回退，并行向 Google Gemini API 发送真实探测请求（常规模型限时 20s，Hydrogen 不设短超时以实测真实耗时，不计入科研 Token 账单）...
                     </span>
                   </div>
                 ) : probeError ? (

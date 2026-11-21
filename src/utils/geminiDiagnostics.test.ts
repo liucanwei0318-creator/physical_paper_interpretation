@@ -159,11 +159,26 @@ test('classifyModelProbeError distinguishes paid 429, free 429, auth 403, not_fo
 
   const timeout = classifyModelProbeError(
     'gemini-4-hydrogen',
-    new Error('TimeoutError: 12000ms exceeded'),
-    12001
+    new Error('TimeoutError: 20000ms exceeded'),
+    20001
   );
   assert.equal(timeout.status, 'timeout');
   assert.match(timeout.statusLabelZh, /超时/);
+
+  const overload503 = classifyModelProbeError(
+    'gemini-4-hydrogen',
+    new Error('{"error":{"code":503,"message":"This model is currently experiencing high demand."}}'),
+    1420
+  );
+  assert.equal(overload503.ok, false);
+  assert.equal(overload503.httpStatus, 503);
+  assert.match(overload503.statusLabelZh, /503.*拥塞/);
+
+  const cascade503 = classifyGeminiError(
+    new Error('503 UNAVAILABLE: This model is currently experiencing high demand.')
+  );
+  assert.equal(cascade503.retryable, true);
+  assert.match(cascade503.reasonZh, /503/);
 });
 
 test('cleanAndParseJson strips code fences and reports truncated JSON cleanly', () => {
